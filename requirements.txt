@@ -1,5 +1,9 @@
-# Core Logic
-pydantic==2.6.0
-typing_extensions==4.9.0
-pandas==2.2.0
-langchain-core==0.1.0
+# Agentic Requirements
+langchain-core>=0.2.0
+langgraph>=0.1.0
+
+# Schema Related
+pydantic>=2.6.0
+
+# Data Related
+pandas>=2.2.0
