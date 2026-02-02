@@ -36,7 +36,7 @@ OperationType = Literal[
 # the Profiler and the Semantic Agent.
 ################################################################################
 
-# Schema defintions for each column
+# Schema definitions for each column
 class ColumnProfile(BaseModel):
     name: str = Field(..., description="The name of the column in the dataframe.")
     inferred_type: str = Field(..., description="The inferred data type (e.g., 'Numeric', 'Categorical', 'Datetime').")
@@ -63,7 +63,7 @@ class ColumnProfile(BaseModel):
         description="List of strings flagging issues (e.g., 'High Cardinality', 'Constant Value', 'Possible PII')."
     )
 
-# Schema defintion for the entire dataset
+# Schema definition for the entire dataset
 class DatasetProfile(BaseModel):
     row_count: int = Field(..., description="Total number of rows in the raw dataset.")
     columns: List[ColumnProfile] = Field(..., description="List of profiles for each column.")
