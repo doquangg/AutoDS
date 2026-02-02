@@ -7,7 +7,7 @@ from typing import Annotated, List, Optional
 from typing_extensions import TypedDict
 import pandas as pd
 from langchain_core.messages import BaseMessage
-from core.schema import DatasetProfile, CleaningRecipe, CleaningLogEntry
+from core.schemas import DatasetProfile, CleaningRecipe, CleaningLogEntry
 
 class AgentState(TypedDict):
     # --- Inputs ---
