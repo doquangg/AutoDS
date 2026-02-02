@@ -96,6 +96,20 @@ class CleaningRecipe(BaseModel):
     """The full plan returned by the Semantic Agent."""
     steps: List[CleaningStep]
 
+################################################################################
+# Schema Definitions for Audit Trail:
+# Tracks the actual history of what was executed in the Sandbox to retrain
+# context.
+################################################################################
+
+class CleaningLogEntry(BaseModel):
+    timestamp: str = Field(..., description="ISO 8601 timestamp of when the step was executed.")
+    step_id: int = Field(..., description="The ID of the step from the original plan.")
+    operation: str = Field(..., description="The operation performed.")
+    justification: str = Field(..., description="The reasoning behind the operation.")
+    code_executed: str = Field(..., description="The actual Python code that was run.")
+    status: Literal["SUCCESS", "FAILED"] = Field(..., description="Whether the execution succeeded or failed.")
+
 
 ################################################################################
 # Schema Definitions for Tools:
