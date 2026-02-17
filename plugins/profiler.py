@@ -158,7 +158,11 @@ def _datetime_consistency(series: pd.Series, sample_size: int = 200) -> tuple[fl
         sample = s.astype(str).head(sample_size)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            dt = pd.to_datetime(sample, errors="coerce")
+            try:
+                dt = pd.to_datetime(sample, errors="coerce", format="mixed")
+            except TypeError:
+                # Older pandas fallback (no format="mixed")
+                dt = pd.to_datetime(sample, errors="coerce")
 
     if dt.isna().all():
         return 0.0, None, None
