@@ -46,7 +46,11 @@ def _infer_type(series: pd.Series) -> str:
         sample = s.astype(str).head(50)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            parsed = pd.to_datetime(sample, errors="coerce")
+            try:
+                parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+            except TypeError:
+                # Older pandas fallback (no format="mixed")
+                parsed = pd.to_datetime(sample, errors="coerce")
         if parsed.notna().mean() >= 0.8:  # mostly parseable => treat as datetime
             return "Datetime"
 
@@ -112,6 +116,64 @@ def _semantic_warnings(series: pd.Series, inferred_type: str, unique_factor: flo
     return warnings
 
 
+def _pattern_signature(s: str) -> str:
+    """Compact pattern signature: A=letters, 9=digits, _=space, .=other"""
+    out = []
+    for ch in s:
+        if ch.isalpha():
+            out.append("A")
+        elif ch.isdigit():
+            out.append("9")
+        elif ch.isspace():
+            out.append("_")
+        else:
+            out.append(".")
+    return "".join(out)
+
+
+def _regex_consistency(series: pd.Series, sample_size: int = 200) -> tuple[float | None, str | None]:
+    """Return (consistency_ratio, dominant_pattern_signature)."""
+    s = series.dropna().astype(str)
+    if s.empty:
+        return None, None
+    s = s.head(sample_size)
+    sigs = s.map(_pattern_signature)
+    vc = sigs.value_counts()
+    dominant = vc.index[0]
+    ratio = float(vc.iloc[0] / len(sigs)) if len(sigs) else None
+    return ratio, str(dominant)
+
+
+def _datetime_consistency(series: pd.Series, sample_size: int = 200) -> tuple[float | None, str | None, str | None]:
+    """Return (consistency_ratio, earliest_iso, latest_iso) using best-effort parsing."""
+    s = series.dropna()
+    if s.empty:
+        return None, None, None
+
+    # If already datetime dtype
+    if pd.api.types.is_datetime64_any_dtype(series):
+        dt = pd.to_datetime(s, errors="coerce")
+    else:
+        # Parse object/string datetimes on a sample (cheap)
+        sample = s.astype(str).head(sample_size)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            dt = pd.to_datetime(sample, errors="coerce")
+
+    if dt.isna().all():
+        return 0.0, None, None
+
+    ratio = float(dt.notna().mean())
+
+    dt_valid = dt.dropna()
+    earliest = dt_valid.min()
+    latest = dt_valid.max()
+    earliest_iso = earliest.isoformat() if hasattr(earliest, "isoformat") else str(earliest)
+    latest_iso = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
+
+    return ratio, earliest_iso, latest_iso
+
+
 def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Generate a DatasetProfile-compatible dict for the given dataframe.
@@ -134,6 +196,18 @@ def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
 
         min_value = max_value = mean = skewness = None
 
+        median = None
+        zero_count = None
+        negative_count = None
+        inf_nan_count = None
+
+        earliest_date = None
+        latest_date = None
+        datetime_format_consistency = None
+
+        regex_format_consistency = None
+        dominant_pattern = None
+
         if inferred_type == "Numeric":
             s_num = pd.to_numeric(series, errors="coerce")
             # Exclude non-finite
@@ -144,7 +218,22 @@ def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
                 mean = _safe_float(s_num.mean())
                 skewness = _safe_float(s_num.skew())
 
+                median = _safe_float(s_num.median())
+
+            # Counts (computed even if all NaN after coercion)
+            zero_count = int((s_num == 0).sum()) if len(s_num) else 0
+            negative_count = int((s_num < 0).sum()) if len(s_num) else 0
+            # inf count already mapped to NaN above, but count original non-finite via coercion result:
+            inf_nan_count = int(s_num.isna().sum())
+
         top_vals = _top_frequent_values(series, k=5)
+
+        if inferred_type == "Datetime":
+            datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
+
+        # Regex/pattern consistency for string/categorical-like columns
+        if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+            regex_format_consistency, dominant_pattern = _regex_consistency(series)
         warnings = _semantic_warnings(series, inferred_type, unique_factor)
 
         columns.append(
@@ -157,6 +246,15 @@ def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
                 max_value=max_value,
                 mean=mean,
                 skewness=skewness,
+                median=median,
+                zero_count=zero_count,
+                negative_count=negative_count,
+                inf_nan_count=inf_nan_count,
+                earliest_date=earliest_date,
+                latest_date=latest_date,
+                datetime_format_consistency=datetime_format_consistency,
+                regex_format_consistency=regex_format_consistency,
+                dominant_pattern=dominant_pattern,
                 top_frequent_values=top_vals,
                 semantic_warnings=warnings,
             )

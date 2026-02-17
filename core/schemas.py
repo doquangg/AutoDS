@@ -50,6 +50,27 @@ class ColumnProfile(BaseModel):
     max_value: Optional[float] = Field(None, description="Maximum value. Look for 999, 9999, or future years.")
     mean: Optional[float] = Field(None, description="Arithmetic mean.")
     skewness: Optional[float] = Field(None, description="Fisher-Pearson skewness. >1 or <-1 implies heavy skew.")
+
+    # Numeric Extra Signals (Optional / Non-breaking)
+    median: Optional[float] = Field(None, description="Median value (robust central tendency).")
+    zero_count: Optional[int] = Field(None, description="Count of exact zeros (useful for sentinels/encoding).")
+    negative_count: Optional[int] = Field(None, description="Count of negative values.")
+    inf_nan_count: Optional[int] = Field(None, description="Count of inf/-inf/NaN after numeric coercion.")
+
+    # Datetime Signals (Optional / Non-breaking)
+    earliest_date: Optional[str] = Field(None, description="Earliest date (ISO string if possible).")
+    latest_date: Optional[str] = Field(None, description="Latest date (ISO string if possible).")
+    datetime_format_consistency: Optional[float] = Field(
+        None, description="0–1 ratio: how consistently values match the dominant datetime format."
+    )
+
+    # String/Categorical Signals (Optional / Non-breaking)
+    regex_format_consistency: Optional[float] = Field(
+        None, description="0–1 ratio: how consistently values match the dominant regex-like pattern."
+    )
+    dominant_pattern: Optional[str] = Field(
+        None, description="Short signature of dominant pattern (kept compact for LLM tokens)."
+    )
     
     # Contextual Samples (The "Fingerprint")
     top_frequent_values: List[Dict[str, Any]] = Field(
