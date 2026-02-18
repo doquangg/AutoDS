@@ -71,6 +71,12 @@ class ColumnProfile(BaseModel):
     dominant_pattern: Optional[str] = Field(
         None, description="Short signature of dominant pattern (kept compact for LLM tokens)."
     )
+
+    # Optional: compact ydata-profiling enrichment (whitelisted keys only)
+    ydata_metrics: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Optional dict of extra ydata-derived metrics (kept compact; do NOT store raw ydata JSON)."
+    )
     
     # Contextual Samples (The "Fingerprint")
     top_frequent_values: List[Dict[str, Any]] = Field(

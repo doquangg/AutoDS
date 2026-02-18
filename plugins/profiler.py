@@ -14,6 +14,8 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import json
+import time
 
 from core.schemas import DatasetProfile, ColumnProfile
 
@@ -178,7 +180,76 @@ def _datetime_consistency(series: pd.Series, sample_size: int = 200) -> tuple[fl
     return ratio, earliest_iso, latest_iso
 
 
-def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
+
+
+def _ydata_profile_whitelist(df: pd.DataFrame) -> tuple[Dict[str, Dict[str, Any]], str | None]:
+    """
+    Run ydata-profiling and return a compact per-column dict of whitelisted metrics.
+
+    Fail-open behavior: on any error, returns ({}, error_string). Baseline still works.
+    """
+    try:
+        # Import only when needed to keep baseline lightweight
+        from ydata_profiling import ProfileReport
+
+        # Keep it lightweight: minimal report, no progress bar
+        report = ProfileReport(df, minimal=True, progress_bar=False)
+        payload = json.loads(report.to_json())
+
+        variables = payload.get("variables") or {}
+        out: Dict[str, Dict[str, Any]] = {}
+
+        # Small whitelist: prefer *non-overlapping* extras (only include keys if present)
+        common = [
+            "n_missing", "p_missing",
+            "n_distinct", "p_distinct",
+            "memory_size",
+        ]
+        numeric_extra = [
+            "std", "variance", "kurtosis", "iqr", "mad",
+        ]
+        categorical_extra = [
+            "n_unique", "p_unique",
+            "max_length", "min_length", "avg_length",
+        ]
+        datetime_extra = [
+            "min", "max",
+            "n_unique", "p_unique",
+        ]
+
+        for col, v in variables.items():
+            vtype = (v.get("type") or "").lower()
+            keep = {}
+
+            for k in common:
+                if k in v:
+                    keep[k] = v[k]
+
+            # Type-sensitive extras (best-effort; keys may differ by ydata version)
+            if "numeric" in vtype:
+                for k in numeric_extra:
+                    if k in v:
+                        keep[k] = v[k]
+            elif "date" in vtype or "time" in vtype or "datetime" in vtype:
+                for k in datetime_extra:
+                    if k in v:
+                        keep[k] = v[k]
+            else:
+                for k in categorical_extra:
+                    if k in v:
+                        keep[k] = v[k]
+
+            # Cap size hard to avoid token blowups
+            if keep:
+                out[str(col)] = dict(list(keep.items())[:20])
+
+        return out, None
+
+    except Exception as e:
+        return {}, str(e)
+
+
+def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[str, Any]:
     """
     Generate a DatasetProfile-compatible dict for the given dataframe.
     """
@@ -186,6 +257,37 @@ def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
         raise TypeError("generate_profile expects a pandas.DataFrame")
 
     row_count = int(len(df))
+
+    # Optional detailed profiling (ydata-profiling) with guardrails
+    ydata_by_col: Dict[str, Dict[str, Any]] = {}
+    ydata_error: str | None = None
+    ydata_skipped: str | None = None
+    if detailed_profiler:
+        # Guardrails: sample big datasets, cap extremely wide tables, fail-open on errors
+        ROW_THRESHOLD = 50_000
+        SAMPLE_N = 10_000
+        COL_CAP = 200
+
+        TIME_BUDGET_SEC = 8.0  # soft budget; if exceeded, treat as fallback
+        if df.shape[1] <= COL_CAP:
+            df_y = df
+            if row_count > ROW_THRESHOLD:
+                df_y = df.sample(n=min(SAMPLE_N, row_count), random_state=42)
+            try:
+                _t0 = time.perf_counter()
+                ydata_by_col, ydata_error = _ydata_profile_whitelist(df_y)
+                _elapsed = time.perf_counter() - _t0
+                if _elapsed > TIME_BUDGET_SEC:
+                    # Soft budget: we can't interrupt ydata mid-run, but we can fail-open if it took too long
+                    ydata_by_col = {}
+                    ydata_error = f"ydata_time_budget_exceeded:{_elapsed:.2f}s"
+            except Exception as e:
+                ydata_by_col, ydata_error = {}, f"ydata_exception:{type(e).__name__}"
+        else:
+            # Too many columns -> skip ydata to avoid performance/memory blowups
+            ydata_by_col = {}
+            ydata_skipped = "wide_table"
+
     columns: List[ColumnProfile] = []
 
     for col in df.columns:
@@ -239,6 +341,11 @@ def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
         if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
             regex_format_consistency, dominant_pattern = _regex_consistency(series)
         warnings = _semantic_warnings(series, inferred_type, unique_factor)
+        if detailed_profiler:
+            if ydata_error:
+                warnings.append("ydata_fallback_to_baseline")
+            elif ydata_skipped == "wide_table":
+                warnings.append("ydata_skipped_wide_table")
 
         columns.append(
             ColumnProfile(
@@ -259,6 +366,7 @@ def generate_profile(df: pd.DataFrame) -> Dict[str, Any]:
                 datetime_format_consistency=datetime_format_consistency,
                 regex_format_consistency=regex_format_consistency,
                 dominant_pattern=dominant_pattern,
+                ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
                 top_frequent_values=top_vals,
                 semantic_warnings=warnings,
             )
