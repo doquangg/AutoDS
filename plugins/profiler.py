@@ -19,6 +19,9 @@ import time
 
 from core.schemas import DatasetProfile, ColumnProfile
 
+# ydata metric cap (keep profile compact for LLM/tokens)
+DEFAULT_MAX_METRICS_PER_COL = 20
+
 
 def _safe_float(x: Any) -> float | None:
     """Convert numpy/pandas scalars to python float; return None if not finite."""
@@ -66,37 +69,64 @@ def _infer_type(series: pd.Series) -> str:
     return "Categorical"
 
 
+def _to_json_safe(val: Any) -> Any:
+    """Convert values into JSON-safe primitives."""
+    if val is None:
+        return None
+    if isinstance(val, (pd.Timestamp, pd.Timedelta)):
+        try:
+            return val.isoformat()
+        except Exception:
+            return str(val)
+    if isinstance(val, (np.generic,)):
+        return _to_json_safe(val.item())
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            return val.decode("utf-8")
+        except Exception:
+            return str(val)
+    if isinstance(val, dict):
+        return {str(_to_json_safe(k)): _to_json_safe(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set)):
+        return [_to_json_safe(x) for x in list(val)]
+    if isinstance(val, (str, int, float, bool)):
+        return val
+    return str(val)
+
+
 def _top_frequent_values(series: pd.Series, k: int = 5) -> List[Dict[str, Any]]:
-    """Return top-k frequent values (including NaN excluded)."""
-    vc = series.dropna().value_counts(dropna=True).head(k)
+    """Return top-k frequent values (including NaN excluded) in JSON-safe forms."""
+
+    try:
+        vc = series.dropna().value_counts(dropna=True).head(k)
+    except TypeError:
+        vc = series.dropna().map(_to_json_safe).astype(str).value_counts().head(k)
     out: List[Dict[str, Any]] = []
     for v, c in vc.items():
-        # Convert numpy types to python primitives for JSON friendliness
-        if isinstance(v, (np.generic,)):
-            v = v.item()
-        out.append({"value": v, "count": int(c)})
+        out.append({"value": _to_json_safe(v), "count": int(c)})
     return out
 
 
+# issues = local name (avoid shadowing stdlib warnings); schema field stays semantic_warnings for API stability
 def _semantic_warnings(series: pd.Series, inferred_type: str, unique_factor: float) -> List[str]:
-    warnings: List[str] = []
+    issues: List[str] = []
     s_nonnull = series.dropna()
     n = len(series)
 
     # High cardinality / possible ID or PII proxy
     if n > 0 and unique_factor > 0.95 and n >= 50:
-        warnings.append("High Cardinality")
+        issues.append("High Cardinality")
 
     # Constant / near-constant
     if len(s_nonnull) > 0:
         top = s_nonnull.value_counts().iloc[0]
         if top / len(s_nonnull) >= 0.99 and len(s_nonnull) >= 50:
-            warnings.append("Near Constant Value")
+            issues.append("Near Constant Value")
 
     # Missingness
     missing = int(series.isna().sum())
     if n > 0 and (missing / n) >= 0.3:
-        warnings.append("High Missingness")
+        issues.append("High Missingness")
 
     # Numeric-specific sentinel hints
     if inferred_type == "Numeric" and len(s_nonnull) > 0:
@@ -104,18 +134,18 @@ def _semantic_warnings(series: pd.Series, inferred_type: str, unique_factor: flo
         # Common sentinel values
         for sentinel in (-1, 0, 999, 9999):
             if (s_num == sentinel).mean() >= 0.05:  # appears in >=5% rows
-                warnings.append(f"Possible Sentinel: {sentinel}")
+                issues.append(f"Possible Sentinel: {sentinel}")
 
         if (s_num < 0).any():
-            warnings.append("Contains Negative Values")
+            issues.append("Contains Negative Values")
 
     # String cleanliness
     if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
         sample = s_nonnull.astype(str).head(200)
         if (sample.str.strip() != sample).any():
-            warnings.append("Leading/Trailing Whitespace")
+            issues.append("Leading/Trailing Whitespace")
 
-    return warnings
+    return issues
 
 
 def _pattern_signature(s: str) -> str:
@@ -182,7 +212,7 @@ def _datetime_consistency(series: pd.Series, sample_size: int = 200) -> tuple[fl
 
 
 
-def _ydata_profile_whitelist(df: pd.DataFrame) -> tuple[Dict[str, Dict[str, Any]], str | None]:
+def _ydata_profile_whitelist(df: pd.DataFrame, max_metrics_per_col: int = 20) -> tuple[Dict[str, Dict[str, Any]], str | None]:
     """
     Run ydata-profiling and return a compact per-column dict of whitelisted metrics.
 
@@ -241,7 +271,7 @@ def _ydata_profile_whitelist(df: pd.DataFrame) -> tuple[Dict[str, Dict[str, Any]
 
             # Cap size hard to avoid token blowups
             if keep:
-                out[str(col)] = dict(list(keep.items())[:20])
+                out[str(col)] = dict(list(keep.items())[:max_metrics_per_col])
 
         return out, None
 
@@ -275,7 +305,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[
                 df_y = df.sample(n=min(SAMPLE_N, row_count), random_state=42)
             try:
                 _t0 = time.perf_counter()
-                ydata_by_col, ydata_error = _ydata_profile_whitelist(df_y)
+                ydata_by_col, ydata_error = _ydata_profile_whitelist(df_y, max_metrics_per_col=DEFAULT_MAX_METRICS_PER_COL)
                 _elapsed = time.perf_counter() - _t0
                 if _elapsed > TIME_BUDGET_SEC:
                     # Soft budget: we can't interrupt ydata mid-run, but we can fail-open if it took too long
@@ -294,8 +324,12 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[
         series = df[col]
         non_null = int(series.notna().sum())
         completeness = (non_null / row_count) if row_count > 0 else 0.0
+        try:
+            unique_count = int(series.nunique(dropna=True))
+        except TypeError:
+            # Handle unhashable objects (e.g., dict/list) by counting uniques on JSON-safe strings
+            unique_count = int(series.dropna().map(_to_json_safe).astype(str).nunique())
 
-        unique_count = int(series.nunique(dropna=True))
         unique_factor = (unique_count / row_count) if row_count > 0 else 0.0
 
         inferred_type = _infer_type(series)
@@ -340,12 +374,12 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[
         # Regex/pattern consistency for string/categorical-like columns
         if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
             regex_format_consistency, dominant_pattern = _regex_consistency(series)
-        warnings = _semantic_warnings(series, inferred_type, unique_factor)
+        issues = _semantic_warnings(series, inferred_type, unique_factor)
         if detailed_profiler:
             if ydata_error:
-                warnings.append("ydata_fallback_to_baseline")
+                issues.append("ydata_fallback_to_baseline")
             elif ydata_skipped == "wide_table":
-                warnings.append("ydata_skipped_wide_table")
+                issues.append("ydata_skipped_wide_table")
 
         columns.append(
             ColumnProfile(
@@ -368,7 +402,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[
                 dominant_pattern=dominant_pattern,
                 ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
                 top_frequent_values=top_vals,
-                semantic_warnings=warnings,
+                semantic_warnings=issues,
             )
         )
 
