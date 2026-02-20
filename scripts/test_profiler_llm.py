@@ -38,7 +38,7 @@ from plugins.profiler import generate_profile  # noqa: E402
 # ---------------------------------------------------------------------------
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
-DATA_PATH = REPO_ROOT / "data" / "sample_data" / "dirty_healthcare_visits_no_notes.csv"
+DATA_PATH = REPO_ROOT / "data" / "sample_data" / "healthcare" / "dirty_healthcare_visits_no_notes.csv"
 
 # ---------------------------------------------------------------------------
 # Prompt
