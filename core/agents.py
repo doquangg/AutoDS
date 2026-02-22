@@ -87,7 +87,7 @@ def get_llm() -> ChatOpenAI:
 
 # FIXME (#19):
 # Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded.
+# they were vibecoded. Update script to read prompt from some directory.
 INVESTIGATOR_SYSTEM_PROMPT = """\
 You are a senior data quality analyst. Your job is to examine a dataset profile \
 and identify every semantic data quality issue that could corrupt a machine \
@@ -228,7 +228,7 @@ def _parse_investigation_findings(
 
 # FIXME (#19):
 # Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded.
+# they were vibecoded. Update script to read prompt from some directory.
 CODEGEN_SYSTEM_PROMPT = """\
 You are an expert Python data engineer. Your job is to write a CleaningRecipe: \
 an ordered list of executable pandas code steps that clean a DataFrame.
@@ -338,7 +338,7 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
 
 # FIXME (#19):
 # Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded.
+# they were vibecoded. Update script to read prompt from some directory.
 ANSWER_SYSTEM_PROMPT = """\
 You are a data science consultant presenting results to a business stakeholder.
 

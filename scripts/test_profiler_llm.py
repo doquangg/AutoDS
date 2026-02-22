@@ -65,13 +65,16 @@ DATA_PATH = (
     / "dirty_healthcare_visits_no_notes.csv"
 )
 
-MAX_TOOL_CALLS = 10  # Safety cap on investigator tool loop
+MAX_TOOL_CALLS = 30  # Safety cap on investigator tool loop
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # AGENT 1: Investigator
 # ═══════════════════════════════════════════════════════════════════════════
 
+# FIXME (#19):
+# Prompts shouldn't live here. Also, consider restructuring these prompts;
+# they were vibecoded. Update script to read prompt from some directory.
 INVESTIGATOR_SYSTEM_PROMPT = """\
 You are a senior data quality analyst. Your job is to examine a dataset profile \
 and identify every semantic data quality issue that could corrupt a machine \
@@ -256,6 +259,9 @@ def run_investigator(
 # AGENT 2: Code Generator
 # ═══════════════════════════════════════════════════════════════════════════
 
+# FIXME (#19):
+# Prompts shouldn't live here. Also, consider restructuring these prompts;
+# they were vibecoded. Update script to read prompt from some directory.
 CODEGEN_SYSTEM_PROMPT = """\
 You are an expert Python data engineer. Your job is to write a CleaningRecipe: \
 an ordered list of executable pandas code steps that clean a DataFrame.
@@ -436,6 +442,7 @@ def main() -> None:
     # Give tools access to the DataFrame
     set_working_df(df)
 
+    # NOTE: Input user query here
     user_query = "What patterns in patient visits predict high-cost outcomes?"
 
     findings = run_investigator(llm, profile, user_query)
