@@ -1,0 +1,39 @@
+row_number,notes
+1,normal visit
+2,zero systolic
+3,negative BP
+4,missing weight + negative bill
+5,age 0 adult vitals; dose 0
+6,systolic < diastolic
+7,invalid month in date
+8,sex is blank/space
+9,negative heart rate
+10,fever impossible; leading/trailing whitespace in email
+11,cholesterol extreme outlier
+12,bill overflow-like
+13,NaN temperature
+14,dose is non-numeric
+15,temperature missing decimal
+16,missing bill
+17,unknown insurance plan
+18,phone has letters
+19,units embedded in numeric fields
+20,negative age
+21,missing systolic (blank)
+22,missing diastolic
+23,age extremely high + invalid email underscore maybe ok but odd
+24,weight off by 10x
+25,heart rate 0
+26,severe BP but otherwise normal
+27,absolute zero temp
+28,negative near-zero bill
+29,ok
+30,duplicate patient_id
+31,future visit date
+32,non-date string
+33,systolic as words
+34,missing bill + insurance quoted
+35,missing email
+36,email missing @
+37,Infinity bill
+38,missing insurance plan
