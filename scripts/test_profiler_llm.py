@@ -1,13 +1,22 @@
 """
-Test script: Profiler → LLM → CleaningRecipe
+Test script: Profiler → Investigator Agent → Code Generator Agent
 
-Runs the profiler on data/sample_data/dirty_healthcare_visits.csv, then passes
-the resulting DatasetProfile to a locally-hosted LLM (via vLLM's OpenAI-compatible
-API) and asks it to return a CleaningRecipe conforming to core/schemas.py.
+Runs the full two-agent pipeline WITHOUT LangGraph, to test the core logic
+in isolation:
+
+  1. Profile the dataset (pure computation, no LLM)
+  2. Investigator Agent examines the profile, calls tools to inspect the data,
+     and produces InvestigationFindings (structured diagnosis — no code)
+  3. Code Generator Agent reads the findings and writes a CleaningRecipe
+     (executable Python cleaning steps)
+
+This script manually implements the investigator's tool loop that LangGraph
+would normally handle via ToolNode. This makes it possible to test and debug
+the agents without spinning up the full state machine.
 
 Configuration (environment variables):
   VLLM_BASE_URL  Base URL of the vLLM server  (default: http://localhost:8000/v1)
-  VLLM_MODEL     Model name served by vLLM    (default: Qwen/Qwen3-4B-Instruct-2507)
+  VLLM_MODEL     Model name served by vLLM     (default: Qwen/Qwen3-4B-Instruct-2507)
 
 Usage:
   # Start your vLLM server first:
@@ -21,7 +30,12 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    HumanMessage,
+    SystemMessage,
+    AIMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 
 # ---------------------------------------------------------------------------
@@ -30,236 +44,452 @@ from langchain_openai import ChatOpenAI
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from core.schemas import CleaningRecipe, DatasetProfile  # noqa: E402
+from core.schemas import (  # noqa: E402
+    CleaningRecipe,
+    DatasetProfile,
+    InvestigationFindings,
+)
 from plugins.profiler import generate_profile  # noqa: E402
+from core.tools import (  # noqa: E402
+    investigation_tools,
+    set_working_df,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
-DATA_PATH = REPO_ROOT / "data" / "sample_data" / "healthcare" / "dirty_healthcare_visits_no_notes.csv"
+DATA_PATH = (
+    REPO_ROOT / "data" / "sample_data" / "healthcare"
+    / "dirty_healthcare_visits_no_notes.csv"
+)
 
-# ---------------------------------------------------------------------------
-# Prompt
-# ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """\
-You are an expert data cleaning agent. Your objective is to analyze a DatasetProfile and return a deterministic CleaningRecipe to transform raw, contaminated datasets into type-safe, analysis-ready formats.
+MAX_TOOL_CALLS = 30  # Safety cap on investigator tool loop
 
-## CleaningRecipe Schema
-A CleaningRecipe contains an ordered list of CleaningStep objects. Each step has:
-  - step_id        (int, 1-indexed, determines strict execution order)
-  - operation      (one of the Allowed OperationType values)
-  - target_column  (str | null — the column being modified, if applicable)
-  - parameters     (dict — operation-specific arguments, e.g., {"value": 0})
-  - justification  (str — clinical, objective reasoning for the operation)
-  - python_code    (str — executable Python using the variable `df`. Must be strictly self-contained and execution-safe).
 
-## Allowed OperationType values
-  DROP_COLUMN     — remove an entire column (parameters: {})
-  DROP_ROWS       — filter out rows (parameters: {"condition": "<pandas query>"})
-  IMPUTE_MEAN     — fill missing values with column mean (parameters: {})
-  IMPUTE_MEDIAN   — fill missing values with column median (parameters: {})
-  IMPUTE_MODE     — fill missing values with column mode (parameters: {})
-  IMPUTE_CONSTANT — fill missing values with a fixed value (parameters: {"value": <val>})
-  RENAME_COLUMN   — rename a column (parameters: {"new_name": "<name>"})
-  CAST_TYPE       — cast column to a new dtype (parameters: {"dtype": "<dtype>"})
-  StandardScaler  — z-score normalize a numeric column (parameters: {})
-  MinMaxScaler    — min-max scale a numeric column (parameters: {})
-  OneHotEncode    — one-hot encode a categorical column (parameters: {})
-  CUSTOM_CODE     — arbitrary pandas/numpy transformations (parameters: {})
+# ═══════════════════════════════════════════════════════════════════════════
+# AGENT 1: Investigator
+# ═══════════════════════════════════════════════════════════════════════════
 
-## Strict Execution Guidelines
+# FIXME (#19):
+# Prompts shouldn't live here. Also, consider restructuring these prompts;
+# they were vibecoded. Update script to read prompt from some directory.
+INVESTIGATOR_SYSTEM_PROMPT = """\
+You are a senior data quality analyst. Your job is to examine a dataset profile \
+and identify every semantic data quality issue that could corrupt a machine \
+learning model.
 
-1. PIPELINE HIERARCHY: You MUST sequence operations in the following strict order to prevent execution crashes:
-   a. String Parsing & Artifact Removal: Use CUSTOM_CODE for regex stripping, replacing whitespace with `np.nan`, and extracting numerics from mixed alphanumeric strings.
-   b. Coercion: Safely convert types using `pd.to_numeric(..., errors='coerce')` or `pd.to_datetime`. Never use inequalities (`<`, `>`) on columns before this step.
-   c. Sentinel & Bounds Nullification: Use CUSTOM_CODE to replace domain-impossible values (e.g., negative physical limits, 9999 sentinels) with `np.nan`. DO NOT hallucinate that imputation steps will "handle" or "flag" these. You must write explicit code to nullify them BEFORE statistical calculations.
-   d. Imputation: Apply statistical or constant fills (IMPUTE_*) only after out-of-bounds values are converted to NaNs.
+You will receive:
+1. The user's question (what they want to predict/answer)
+2. A statistical profile of every column in the dataset
 
-2. SCIENTIFIC NOTATION & REGEX SAFETY: When using regex to extract numbers from strings, you MUST support scientific notation and negative values. Use `r'[^\\d\\.\\-\\+eE]'` to prevent truncating values like `1e309`. Never use literal line breaks in regex strings.
+Your task:
+- Identify the TARGET COLUMN that best answers the user's question
+- Find ALL semantic violations in the data
+- Classify each violation by severity and category
+- Provide specific evidence from the profile for each finding
+- Suggest plain-English fixes (NOT code — just intent)
+- Assess overall data quality (0.0 to 1.0)
+- Note any caveats that should accompany the final answer
 
-3. NULL CORRUPTION PREVENTION: Never use `df['col'].astype(str)` naively on categorical strings. This permanently converts true `np.nan` values into the literal string `"nan"`, destroying downstream null checks. If string coercion is necessary for stripping, you must chain `.replace({'nan': np.nan, '': np.nan})` immediately afterward.
+WHAT TO LOOK FOR:
+- Sentinel values masquerading as real data (-1, 0, 999, 9999, "N/A", "Unknown")
+  Check: top_frequent_values, min_value, max_value
+- Temporal impossibilities (event B before event A)
+  Check: use temporal_ordering_check tool
+- Cross-column logic errors (impossible combinations)
+  Check: use cross_column_frequency tool
+- Type mismatches (numeric column storing categories, or vice versa)
+  Check: inferred_type vs semantic meaning
+- Suspicious distributions (spikes at sentinel values, extreme skew)
+  Check: use value_distribution tool
+- Systematic missingness (columns null together)
+  Check: use null_co_occurrence tool
+- High cardinality columns that are likely IDs (should be dropped)
+  Check: unique_factor > 0.95
+- PII that should not be used as features
 
-4. DOMAIN CONSTRAINTS: Evaluate the physical or logical constraints of every variable. Do not impute `0` for continuous physical measurements unless `0` is a valid physiological state. 
+USE YOUR TOOLS to verify suspicions. Don't guess — inspect the actual data.
+But be efficient: don't call the same tool repeatedly with minor variations.
 
-5. CODE EXECUTION RULES:
-   - No imports are allowed in `python_code` (pandas as `pd` and numpy as `np` are pre-loaded).
-   - Ensure boolean masks handle NaNs safely.
-   
-## Few-Shot Demonstration 1: Contaminated Numeric Vectors
-
-[Context - ColumnProfile Input]
-{
-  "name": "body_temperature_c",
-  "inferred_type": "Categorical",
-  "completeness": 0.98,
-  "unique_factor": 0.15,
-  "top_frequent_values": [
-    {"value": "36.8", "count": 450},
-    {"value": "37.1 C", "count": 120},
-    {"value": "999.0", "count": 15},
-    {"value": "-273.15", "count": 2}
-  ],
-  "semantic_warnings": ["Mixed alphanumeric types", "Potential sentinel values detected"]
-}
-
-[WRONG APPROACH - FATAL EXECUTION & DOMAIN VIOLATION]
-{
-  "steps": [
-    {
-      "step_id": 1,
-      "operation": "IMPUTE_MEDIAN",
-      "target_column": "body_temperature_c",
-      "parameters": {},
-      "justification": "Impute missing temperature values. Values outside 35-42C will be handled here.",
-      "python_code": "df['body_temperature_c'] = df['body_temperature_c'].fillna(df['body_temperature_c'].median())"
-    }
-  ]
-}
-Critique of Failure: 
-1. Hallucinated Logic: The agent falsely claims the IMPUTE_MEDIAN operation will "handle" outliers. It will not. The sentinel (999.0) and impossible value (-273.15) remain in the dataset, heavily skewing the median and corrupting the vector.
-2. Type Error Crash: The column contains strings ("37.1 C"). Calculating the median of a string column will crash pandas.
-
-[CORRECT APPROACH - SAFE & LOGICAL]
-{
-  "steps": [
-    {
-      "step_id": 1,
-      "operation": "CUSTOM_CODE",
-      "target_column": "body_temperature_c",
-      "parameters": {},
-      "justification": "Strip non-numeric characters (like 'C') supporting scientific notation, safely coerce to float64, and catch invalid strings as NaNs.",
-      "python_code": "df['body_temperature_c'] = pd.to_numeric(df['body_temperature_c'].astype(str).str.replace(r'[^\\d\\.\\-\\+eE]', '', regex=True).replace({'nan': np.nan, '': np.nan}), errors='coerce')"
-    },
-    {
-      "step_id": 2,
-      "operation": "CUSTOM_CODE",
-      "target_column": "body_temperature_c",
-      "parameters": {},
-      "justification": "Nullify physiological impossibilities (temp < 30C or temp > 45C) and domain sentinels (999.0) prior to statistical aggregation.",
-      "python_code": "df.loc[(df['body_temperature_c'] < 30.0) | (df['body_temperature_c'] > 45.0), 'body_temperature_c'] = np.nan"
-    },
-    {
-      "step_id": 3,
-      "operation": "IMPUTE_MEDIAN",
-      "target_column": "body_temperature_c",
-      "parameters": {},
-      "justification": "Impute safe NaNs using the median to provide a robust measure of central tendency.",
-      "python_code": "df['body_temperature_c'] = df['body_temperature_c'].fillna(df['body_temperature_c'].median())"
-    }
-  ]
-}
-
-## Few-Shot Demonstration 2: Categorical String Cleaning
-
-[Context - ColumnProfile Input]
-{
-  "name": "sex",
-  "inferred_type": "Categorical",
-  "completeness": 0.95,
-  "top_frequent_values": [
-    {"value": "M", "count": 450},
-    {"value": "F", "count": 420},
-    {"value": " ", "count": 15}
-  ]
-}
-
-[WRONG APPROACH - NULL CORRUPTION]
-{
-  "steps": [
-    {
-      "step_id": 1,
-      "operation": "CUSTOM_CODE",
-      "target_column": "sex",
-      "parameters": {},
-      "justification": "Strip whitespace.",
-      "python_code": "df['sex'] = df['sex'].astype(str).str.strip()"
-    }
-  ]
-}
-Critique of Failure: If the dataset contained true `NaN` values, `.astype(str)` converted them into the literal string `"nan"`. Downstream `isna()` checks will now fail. 
-
-[CORRECT APPROACH - SAFE CATEGORICAL PARSING]
-{
-  "steps": [
-    {
-      "step_id": 1,
-      "operation": "CUSTOM_CODE",
-      "target_column": "sex",
-      "parameters": {},
-      "justification": "Strip whitespace and properly convert arbitrary empty spaces or literal 'nan' strings back into true np.nan objects.",
-      "python_code": "df['sex'] = df['sex'].astype(str).str.strip().replace({'nan': np.nan, '': np.nan})"
-    }
-  ]
-}
+You MUST respond with a valid InvestigationFindings JSON object.
+Do NOT write any Python code. Your job is diagnosis, not treatment.\
 """
 
-def build_human_message(profile: DatasetProfile) -> str:
+
+def _build_tool_lookup() -> dict:
+    """Build a name → callable mapping for manual tool execution."""
+    return {t.name: t for t in investigation_tools}
+
+
+def _execute_tool_calls(tool_calls: list, tool_lookup: dict) -> list[ToolMessage]:
+    """
+    Manually execute tool calls and return ToolMessages.
+    This replicates what LangGraph's ToolNode does automatically.
+    """
+    results = []
+    for tc in tool_calls:
+        tool_name = tc["name"]
+        tool_args = tc["args"]
+        tool_id = tc["id"]
+
+        print(f"      🔧 Calling tool: {tool_name}({tool_args})")
+
+        if tool_name not in tool_lookup:
+            output = f"Error: Unknown tool '{tool_name}'"
+        else:
+            try:
+                output = tool_lookup[tool_name].invoke(tool_args)
+            except Exception as e:
+                output = f"Error executing {tool_name}: {type(e).__name__}: {e}"
+
+        # Truncate very long tool outputs to stay within context limits
+        output_str = str(output)
+        if len(output_str) > 3000:
+            output_str = output_str[:3000] + "\n... [truncated]"
+
+        print(f"      ↳ Result: {output_str[:200]}{'...' if len(output_str) > 200 else ''}")
+        results.append(ToolMessage(content=output_str, tool_call_id=tool_id))
+
+    return results
+
+
+def _parse_investigation_findings(
+    response: AIMessage, llm: ChatOpenAI
+) -> InvestigationFindings:
+    """
+    Extract structured InvestigationFindings from the investigator's final
+    response. Tries direct JSON parsing first, falls back to asking the LLM
+    to reformat into the schema.
+    """
+    content = response.content
+
+    # Approach 1: Parse JSON directly (LLM may wrap in code fences)
+    try:
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+
+        data = json.loads(content)
+        return InvestigationFindings(**data)
+    except (json.JSONDecodeError, ValueError, KeyError):
+        pass
+
+    # Approach 2: Ask the LLM to reformat as structured output
+    print("    (Direct JSON parse failed — asking LLM to reformat...)")
+    structured_llm = llm.with_structured_output(InvestigationFindings)
+    findings = structured_llm.invoke([
+        SystemMessage(content=(
+            "Convert the following data quality analysis into the exact "
+            "InvestigationFindings JSON schema. Preserve all information."
+        )),
+        HumanMessage(content=response.content),
+    ])
+    return findings
+
+
+def run_investigator(
+    llm: ChatOpenAI,
+    profile: DatasetProfile,
+    user_query: str,
+) -> InvestigationFindings:
+    """
+    Run the investigator agent with a manual tool loop.
+
+    This replicates the LangGraph flow:
+        investigator → [tool_calls?] → tools → investigator → ... → findings
+
+    Returns the structured InvestigationFindings.
+    """
+    # Bind tools so the LLM can request them
+    llm_with_tools = llm.bind_tools(investigation_tools)
+    tool_lookup = _build_tool_lookup()
+
     profile_json = json.dumps(profile.model_dump(), indent=2, default=str)
-    return (
-        f"Here is the DatasetProfile for the dataset:\n\n"
-        f"```json\n{profile_json}\n```\n\n"
-        "Return a CleaningRecipe that addresses all data quality issues you can "
-        "identify in this profile."
-    )
+
+    messages = [
+        SystemMessage(content=INVESTIGATOR_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            f"USER QUERY: {user_query}\n\n"
+            f"DATASET PROFILE ({profile.row_count} rows):\n"
+            f"{profile_json}"
+        )),
+    ]
+
+    tool_call_count = 0
+
+    while True:
+        # Call the LLM
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)
+
+        # Check for tool calls
+        tool_calls = getattr(response, "tool_calls", None) or []
+
+        if not tool_calls:
+            # Agent is done investigating — parse findings
+            print("    ✅ Investigator finished (no more tool calls).")
+            return _parse_investigation_findings(response, llm)
+
+        # Execute tool calls and feed results back
+        tool_call_count += len(tool_calls)
+        print(f"    Tool calls this turn: {len(tool_calls)} "
+              f"(total: {tool_call_count}/{MAX_TOOL_CALLS})")
+
+        tool_results = _execute_tool_calls(tool_calls, tool_lookup)
+        messages.extend(tool_results)
+
+        # Safety cap
+        if tool_call_count >= MAX_TOOL_CALLS:
+            print(f"    ⚠️  Tool call limit reached ({MAX_TOOL_CALLS}). "
+                  f"Forcing investigator to finalize.")
+            # Ask the LLM to wrap up without tools
+            messages.append(HumanMessage(content=(
+                "You have reached the tool call limit. Based on the evidence "
+                "gathered so far, produce your final InvestigationFindings JSON now. "
+                "Do not request any more tools."
+            )))
+            final_response = llm.invoke(messages)  # No tools bound
+            return _parse_investigation_findings(final_response, llm)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-def main() -> None:
-    # 1. Load data
-    print(f"Loading data from: {DATA_PATH}")
-    if not DATA_PATH.exists():
-        sys.exit(f"ERROR: Data file not found at {DATA_PATH}")
-    df = pd.read_csv(DATA_PATH)
-    print(f"  Loaded {len(df)} rows x {len(df.columns)} columns.\n")
+# ═══════════════════════════════════════════════════════════════════════════
+# AGENT 2: Code Generator
+# ═══════════════════════════════════════════════════════════════════════════
 
-    # 2. Run profiler
-    print("Running profiler...")
-    profile_dict = generate_profile(df, detailed_profiler=False)
-    profile = DatasetProfile.model_validate(profile_dict)
-    print(f"  Profile complete: {profile.row_count} rows, {len(profile.columns)} columns profiled.\n")
-    print("Profile:")
-    print(profile)
+# FIXME (#19):
+# Prompts shouldn't live here. Also, consider restructuring these prompts;
+# they were vibecoded. Update script to read prompt from some directory.
+CODEGEN_SYSTEM_PROMPT = """\
+You are an expert Python data engineer. Your job is to write a CleaningRecipe: \
+an ordered list of executable pandas code steps that clean a DataFrame.
 
-    # 3. Build LLM client
-    print(f"Connecting to vLLM at: {VLLM_BASE_URL}")
-    print(f"  Model: {VLLM_MODEL}\n")
-    llm = ChatOpenAI(
-        base_url=VLLM_BASE_URL,
-        api_key="no-key",  # vLLM local server does not require a real key
-        model=VLLM_MODEL,
-        temperature=0.0,
-    )
+You will receive:
+1. Investigation findings describing exactly what's wrong with the data
+2. The dataset profile (column types, shapes, value distributions)
+
+RULES:
+- Every step must contain valid, executable Python using the variable `df`
+- Each step should be atomic: one clear transformation per step
+- Steps execute in order. Each step receives the `df` from the previous step.
+- Reference the violation_id from findings in your addresses_violation field
+- Use the operation categories from OperationType (DROP_COLUMN, DROP_ROWS, etc.)
+- Use CUSTOM_CODE for anything that doesn't fit a predefined operation
+- Do NOT use StandardScaler or MinMaxScaler — AutoGluon handles scaling internally
+- Preserve the target column — never drop or corrupt it
+- Be conservative: prefer imputation over dropping rows when possible
+
+PIPELINE HIERARCHY — sequence operations in this strict order:
+  a. String Parsing & Artifact Removal (regex stripping, whitespace → NaN)
+  b. Type Coercion (pd.to_numeric, pd.to_datetime with errors='coerce')
+  c. Sentinel & Bounds Nullification (replace impossible values with NaN)
+  d. Imputation (statistical fills ONLY after sentinels are nullified)
+  e. Column drops and renames
+
+CODE STYLE:
+- Always reassign: `df = df[df['age'] > 0]` not `df.drop(..., inplace=True)`
+- Handle edge cases: check column exists before operating on it
+- Use .copy() when creating derived columns from slices
+- String operations: use .str accessor, handle NaN with na=False
+- Never use `df['col'].astype(str)` without chaining `.replace({{'nan': np.nan, '': np.nan}})`
+- No imports in python_code — pd and np are pre-loaded
+
+You MUST respond with a valid CleaningRecipe JSON object.\
+"""
+
+
+def run_code_generator(
+    llm: ChatOpenAI,
+    findings: InvestigationFindings,
+    profile: DatasetProfile,
+    user_query: str,
+) -> CleaningRecipe:
+    """
+    Run the code generator agent. Takes investigation findings as input,
+    returns a CleaningRecipe with executable Python steps.
+    """
     structured_llm = llm.with_structured_output(CleaningRecipe)
 
-    # 4. Call the LLM
-    print("Calling LLM for CleaningRecipe...")
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=build_human_message(profile)),
-    ]
-    recipe: CleaningRecipe = structured_llm.invoke(messages)
-    print(f"  Received {len(recipe.steps)} cleaning step(s).\n")
+    findings_json = json.dumps(findings.model_dump(), indent=2, default=str)
+    profile_json = json.dumps(profile.model_dump(), indent=2, default=str)
 
-    # 5. Display results
+    messages = [
+        SystemMessage(content=CODEGEN_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            f"USER QUERY: {user_query}\n\n"
+            f"INVESTIGATION FINDINGS:\n{findings_json}\n\n"
+            f"DATASET PROFILE:\n{profile_json}\n\n"
+            f"Write a CleaningRecipe to fix all identified violations "
+            f"and prepare this data for ML training. "
+            f"The target column is: {findings.target_column}"
+        )),
+    ]
+
+    recipe: CleaningRecipe = structured_llm.invoke(messages)
+    return recipe
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Display helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def display_findings(findings: InvestigationFindings) -> None:
+    """Pretty-print the investigation findings."""
+    print("=" * 70)
+    print("INVESTIGATION FINDINGS")
+    print("=" * 70)
+
+    print(f"\n  Target Column     : {findings.target_column}")
+    print(f"  Target Rationale  : {findings.target_column_rationale}")
+    print(f"  Task Type         : {findings.task_type}")
+    print(f"  Data Quality Score: {findings.data_quality_score}")
+
+    if findings.violations:
+        print(f"\n  Violations ({len(findings.violations)}):")
+        for v in findings.violations:
+            print(f"\n    [{v.violation_id}] {v.severity} — {v.category}")
+            print(f"        Columns : {', '.join(v.affected_columns)}")
+            print(f"        Issue   : {v.description}")
+            print(f"        Evidence: {v.evidence}")
+            print(f"        Fix     : {v.suggested_action}")
+
+    if findings.columns_to_drop:
+        print(f"\n  Columns to Drop: {findings.columns_to_drop}")
+        for col, reason in findings.columns_to_drop_rationale.items():
+            print(f"    {col}: {reason}")
+
+    if findings.feature_engineering_suggestions:
+        print(f"\n  Feature Engineering Suggestions:")
+        for s in findings.feature_engineering_suggestions:
+            print(f"    - {s}")
+
+    if findings.key_caveats:
+        print(f"\n  Key Caveats for Answer Agent:")
+        for c in findings.key_caveats:
+            print(f"    ⚠ {c}")
+
+    print()
+
+
+def display_recipe(recipe: CleaningRecipe) -> None:
+    """Pretty-print the cleaning recipe."""
     print("=" * 70)
     print("CLEANING RECIPE")
     print("=" * 70)
     for step in recipe.steps:
-        print(f"\nStep {step.step_id}: [{step.operation}]"
-              + (f" → {step.target_column}" if step.target_column else ""))
-        print(f"  Justification : {step.justification}")
+        violation_ref = (
+            f" (addresses violation #{step.addresses_violation})"
+            if step.addresses_violation
+            else ""
+        )
+        print(
+            f"\n  Step {step.step_id}: [{step.operation}]"
+            + (f" → {step.target_column}" if step.target_column else "")
+            + violation_ref
+        )
+        print(f"    Justification : {step.justification}")
         if step.parameters:
-            print(f"  Parameters    : {step.parameters}")
-        print(f"  Python code   : {step.python_code}")
-    print("\n" + "=" * 70)
+            print(f"    Parameters    : {step.parameters}")
+        print(f"    Python code   : {step.python_code}")
+    print()
 
-    # 6. Dump full recipe as JSON for downstream use
-    print("\nFull CleaningRecipe JSON:")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
+
+def main() -> None:
+    # ------------------------------------------------------------------
+    # 1. Load data
+    # ------------------------------------------------------------------
+    print(f"\nLoading data from: {DATA_PATH}")
+    if not DATA_PATH.exists():
+        sys.exit(f"ERROR: Data file not found at {DATA_PATH}")
+    df = pd.read_csv(DATA_PATH)
+    print(f"  Loaded {len(df)} rows × {len(df.columns)} columns.\n")
+
+    # ------------------------------------------------------------------
+    # 2. Profile
+    # ------------------------------------------------------------------
+    print("Running profiler...")
+    profile_dict = generate_profile(df, detailed_profiler=False)
+    profile = DatasetProfile.model_validate(profile_dict)
+    print(f"  Profile complete: {profile.row_count} rows, "
+          f"{len(profile.columns)} columns profiled.\n")
+
+    # ------------------------------------------------------------------
+    # 3. Build LLM client (single instance for both agents)
+    # ------------------------------------------------------------------
+    print(f"Connecting to vLLM at: {VLLM_BASE_URL}")
+    print(f"  Model: {VLLM_MODEL}\n")
+    llm = ChatOpenAI(
+        base_url=VLLM_BASE_URL,
+        api_key="no-key",
+        model=VLLM_MODEL,
+        temperature=0.0,
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Agent 1: Investigator (diagnosis — no code)
+    # ------------------------------------------------------------------
+    print("=" * 70)
+    print("STAGE 1: INVESTIGATOR AGENT")
+    print("=" * 70)
+    print("  Analyzing data quality and identifying violations...\n")
+
+    # Give tools access to the DataFrame
+    set_working_df(df)
+
+    # NOTE: Input user query here
+    user_query = "What patterns in patient visits predict high-cost outcomes?"
+
+    findings = run_investigator(llm, profile, user_query)
+    display_findings(findings)
+
+    # ------------------------------------------------------------------
+    # 5. Agent 2: Code Generator (writes cleaning code)
+    # ------------------------------------------------------------------
+    print("=" * 70)
+    print("STAGE 2: CODE GENERATOR AGENT")
+    print("=" * 70)
+    print("  Generating cleaning code based on investigation findings...\n")
+
+    recipe = run_code_generator(llm, findings, profile, user_query)
+    display_recipe(recipe)
+
+    # ------------------------------------------------------------------
+    # 6. Dump full JSON outputs
+    # ------------------------------------------------------------------
+    print("=" * 70)
+    print("RAW JSON OUTPUTS")
+    print("=" * 70)
+
+    print("\n--- InvestigationFindings ---")
+    print(findings.model_dump_json(indent=2))
+
+    print("\n--- CleaningRecipe ---")
     print(recipe.model_dump_json(indent=2))
+
+    # ------------------------------------------------------------------
+    # 7. Summary
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("PIPELINE SUMMARY")
+    print("=" * 70)
+    print(f"  Violations found       : {len(findings.violations)}")
+    print(f"  Data quality score     : {findings.data_quality_score}")
+    print(f"  Target column          : {findings.target_column}")
+    print(f"  Task type              : {findings.task_type}")
+    print(f"  Cleaning steps planned : {len(recipe.steps)}")
+    print(f"  Columns to drop        : {len(findings.columns_to_drop)}")
+
+    ops = {}
+    for step in recipe.steps:
+        ops[step.operation] = ops.get(step.operation, 0) + 1
+    print(f"  Operations breakdown   : {ops}")
+    print()
 
 
 if __name__ == "__main__":

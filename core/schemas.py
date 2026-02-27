@@ -12,6 +12,12 @@ from pydantic import BaseModel, Field
 # LLM Action Enumerations:
 # These enumerations control what actions the LLM can take to "clean" the input
 # dataset.
+#
+# NOTE: StandardScaler and MinMaxScaler have been REMOVED. These operations fit
+# statistics (mean/std/min/max) on the full dataset. If applied before AutoGluon
+# splits into train/test, test set statistics leak into training. AutoGluon 
+# handles its own internal preprocessing, so these are both dangerous and 
+# redundant. See Issue #25.
 ################################################################################
 
 OperationType = Literal[
@@ -23,11 +29,8 @@ OperationType = Literal[
     "IMPUTE_CONSTANT",
     "RENAME_COLUMN",
     "CAST_TYPE",
-    "StandardScaler",
-    "MinMaxScaler",
     "OneHotEncode",
-    "CUSTOM_CODE" # For any custom cleaning code not covered by the above operations.
-    # We can add more operations as needed, but let's start here for now.
+    "CUSTOM_CODE"
 ]
 
 ################################################################################
@@ -36,7 +39,6 @@ OperationType = Literal[
 # the Profiler and the Semantic Agent.
 ################################################################################
 
-# Schema definitions for each column
 class ColumnProfile(BaseModel):
     name: str = Field(..., description="The name of the column in the dataframe.")
     inferred_type: str = Field(..., description="The inferred data type (e.g., 'Numeric', 'Categorical', 'Datetime').")
@@ -97,10 +99,104 @@ class DatasetProfile(BaseModel):
 
 
 ################################################################################
+# Schema Definitions for Investigation Findings:
+# The structured output of the Investigator Agent. This is the "handoff 
+# document" between the Investigator and the Code Generator. It captures
+# WHAT is wrong with the data, without prescribing HOW to fix it in code.
+#
+# This separation means:
+#   - Findings persist across code-generation retries (no re-investigation)
+#   - The answer agent can read findings to caveat its response
+#   - We get a clean audit trail of what the LLM detected
+################################################################################
+
+class SemanticViolation(BaseModel):
+    """A single data quality issue discovered by the Investigator."""
+    violation_id: int = Field(..., description="Unique ID for this violation (1-indexed).")
+    severity: Literal["CRITICAL", "WARNING", "INFO"] = Field(
+        ..., description="CRITICAL = will corrupt model. WARNING = likely issue. INFO = worth noting."
+    )
+    category: Literal[
+        "SENTINEL_VALUE",       # -1, 999, "N/A" masquerading as real data
+        "TEMPORAL_VIOLATION",   # Events out of causal order
+        "CROSS_COLUMN_LOGIC",   # Impossible combinations across columns
+        "TYPE_ERROR",           # Column dtype doesn't match semantic meaning
+        "MISSING_DATA",         # Nulls, gaps, or systematic missingness
+        "OUTLIER",              # Statistical outliers or impossible values
+        "DUPLICATE",            # Duplicate rows or near-duplicates
+        "PII_DETECTED",         # Personally identifiable information
+        "FORMAT_INCONSISTENCY", # Mixed formats within a column
+        "OTHER"
+    ] = Field(..., description="Category of the violation.")
+    
+    affected_columns: List[str] = Field(
+        ..., description="Which column(s) are involved."
+    )
+    description: str = Field(
+        ..., description="Human-readable explanation of what's wrong. "
+                         "E.g., 'Column age contains 847 rows with value -1, likely a sentinel for missing data.'"
+    )
+    evidence: str = Field(
+        ..., description="Specific evidence from the profile or tool calls that supports this finding. "
+                         "E.g., 'top_frequent_values shows -1 with count=847 (8.5% of rows). "
+                         "min_value=-1, but age cannot be negative.'"
+    )
+    suggested_action: str = Field(
+        ..., description="Plain-English suggestion for how to fix this. NOT code — just intent. "
+                         "E.g., 'Replace -1 values in age with NaN, then impute with median.'"
+    )
+
+
+class InvestigationFindings(BaseModel):
+    """Complete output of the Investigator Agent."""
+    
+    target_column: Optional[str] = Field(
+        None, description="The column that best answers the user's query (prediction target). "
+                          "None if the investigator couldn't determine it."
+    )
+    target_column_rationale: Optional[str] = Field(
+        None, description="Why this column was chosen as the target."
+    )
+    task_type: Optional[Literal[
+        "binary_classification", "multiclass_classification", "regression"
+    ]] = Field(None, description="The ML task type implied by the target column.")
+    
+    violations: List[SemanticViolation] = Field(
+        default_factory=list, description="All semantic violations found in the data."
+    )
+    
+    columns_to_drop: List[str] = Field(
+        default_factory=list,
+        description="Columns that should be dropped entirely (e.g., PII, IDs, constant columns)."
+    )
+    columns_to_drop_rationale: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of column name -> reason for dropping."
+    )
+    
+    feature_engineering_suggestions: List[str] = Field(
+        default_factory=list,
+        description="Plain-English suggestions for derived features. "
+                    "E.g., 'Create days_since_last_purchase from last_purchase_date and today.'"
+    )
+    
+    data_quality_score: float = Field(
+        ..., description="Overall quality score 0.0 (unusable) to 1.0 (pristine). "
+                         "Reflects severity and prevalence of violations."
+    )
+    
+    key_caveats: List[str] = Field(
+        default_factory=list,
+        description="Important caveats the answer agent should mention when presenting results. "
+                    "E.g., 'Income column was 40% sentinel values — predictions involving income may be unreliable.'"
+    )
+
+
+################################################################################
 # Schema Definitions for Agent to Cleaner:
 # These schemas define the exact structure of the JSON files exchanged between
-# the Semantic Agent and the cleaning sandbox.
-#################################################################################
+# the Code Generator Agent and the cleaning sandbox.
+################################################################################
 
 class CleaningStep(BaseModel):
     step_id: int = Field(..., description="The execution order (1-indexed).")
@@ -112,6 +208,12 @@ class CleaningStep(BaseModel):
         description="Arguments for the operation (e.g., {'value': 0} for IMPUTE_CONSTANT)."
     )
     
+    # Links back to the investigation finding that motivated this step
+    addresses_violation: Optional[int] = Field(
+        None, description="The violation_id from InvestigationFindings that this step addresses. "
+                          "Provides traceability from code back to reasoning."
+    )
+    
     justification: str = Field(..., description="Semantic reasoning: WHY are we doing this? (e.g., 'Detected -1 in Age column, likely sentinel').")
     
     python_code: str = Field(
@@ -120,13 +222,13 @@ class CleaningStep(BaseModel):
     )
 
 class CleaningRecipe(BaseModel):
-    """The full plan returned by the Semantic Agent."""
+    """The full plan returned by the Code Generator Agent."""
     steps: List[CleaningStep]
+
 
 ################################################################################
 # Schema Definitions for Audit Trail:
-# Tracks the actual history of what was executed in the Sandbox to retrain
-# context.
+# Tracks the actual history of what was executed in the Sandbox.
 ################################################################################
 
 class CleaningLogEntry(BaseModel):
@@ -140,10 +242,31 @@ class CleaningLogEntry(BaseModel):
 
 ################################################################################
 # Schema Definitions for Tools:
-# These schemas define the exact structure of the JSON files exchanged between
-# the Semantic Agent and the Data Tools for tool inputs/outputs.
+# Input schemas for investigation tools. Each tool function uses one of these
+# as its args_schema so LangChain can generate the correct tool-call JSON.
 ################################################################################
 
 class InspectRowsInput(BaseModel):
     query: str = Field(..., description="Pandas query string to filter rows (e.g., 'age < 0').")
     limit: int = Field(5, description="Number of rows to return (default 5). Keep this small to save tokens.")
+
+class CrossColumnFrequencyInput(BaseModel):
+    col_a: str = Field(..., description="First column name for the crosstab.")
+    col_b: str = Field(..., description="Second column name for the crosstab.")
+    top_n: int = Field(10, description="Max number of combination pairs to return.")
+
+class TemporalOrderingCheckInput(BaseModel):
+    date_col_a: str = Field(..., description="The column expected to occur FIRST chronologically.")
+    date_col_b: str = Field(..., description="The column expected to occur SECOND chronologically.")
+    sample_violations: int = Field(5, description="Number of violating rows to sample.")
+
+class ValueDistributionInput(BaseModel):
+    column: str = Field(..., description="Column name to compute distribution for.")
+    bins: int = Field(20, description="Number of histogram bins for numeric columns.")
+
+class NullCoOccurrenceInput(BaseModel):
+    threshold: float = Field(0.5, description="Minimum co-occurrence ratio to report (0.0-1.0).")
+
+class CorrelationScanInput(BaseModel):
+    target_column: str = Field(..., description="Column to compute correlations against.")
+    top_n: int = Field(10, description="Number of top correlated columns to return.")
