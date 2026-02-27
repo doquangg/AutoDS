@@ -15,12 +15,12 @@ would normally handle via ToolNode. This makes it possible to test and debug
 the agents without spinning up the full state machine.
 
 Configuration (environment variables):
-  VLLM_BASE_URL  Base URL of the vLLM server  (default: http://localhost:8000/v1)
-  VLLM_MODEL     Model name served by vLLM     (default: Qwen/Qwen3-4B-Instruct-2507)
+  OPENAI_API_KEY     OpenAI API key (required)
+  INVESTIGATOR_MODEL Model for the investigator agent (default: gpt-5-2025-08-07)
+  CODEGEN_MODEL      Model for the code generator agent (default: gpt-4.1-2025-04-14)
 
 Usage:
-  # Start your vLLM server first:
-  #   vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000
+  export OPENAI_API_KEY=sk-...
   python scripts/test_profiler_llm.py
 """
 
@@ -58,8 +58,8 @@ from core.tools import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
+INVESTIGATOR_MODEL = os.environ.get("INVESTIGATOR_MODEL", "gpt-5-2025-08-07")
+CODEGEN_MODEL = os.environ.get("CODEGEN_MODEL", "gpt-4.1-2025-04-14")
 DATA_PATH = (
     REPO_ROOT / "data" / "sample_data" / "healthcare"
     / "dirty_healthcare_visits_no_notes.csv"
@@ -420,14 +420,19 @@ def main() -> None:
           f"{len(profile.columns)} columns profiled.\n")
 
     # ------------------------------------------------------------------
-    # 3. Build LLM client (single instance for both agents)
+    # 3. Build LLM clients (one per agent role)
     # ------------------------------------------------------------------
-    print(f"Connecting to vLLM at: {VLLM_BASE_URL}")
-    print(f"  Model: {VLLM_MODEL}\n")
-    llm = ChatOpenAI(
-        base_url=VLLM_BASE_URL,
-        api_key="no-key",
-        model=VLLM_MODEL,
+    print(f"Using OpenAI API")
+    print(f"  Investigator model : {INVESTIGATOR_MODEL}")
+    print(f"  Code generator model: {CODEGEN_MODEL}\n")
+    investigator_llm = ChatOpenAI(
+        model=INVESTIGATOR_MODEL,
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        temperature=0.0,
+    )
+    codegen_llm = ChatOpenAI(
+        model=CODEGEN_MODEL,
+        api_key=os.environ.get("OPENAI_API_KEY"),
         temperature=0.0,
     )
 
@@ -445,7 +450,7 @@ def main() -> None:
     # NOTE: Input user query here
     user_query = "What patterns in patient visits predict high-cost outcomes?"
 
-    findings = run_investigator(llm, profile, user_query)
+    findings = run_investigator(investigator_llm, profile, user_query)
     display_findings(findings)
 
     # ------------------------------------------------------------------
@@ -456,7 +461,7 @@ def main() -> None:
     print("=" * 70)
     print("  Generating cleaning code based on investigation findings...\n")
 
-    recipe = run_code_generator(llm, findings, profile, user_query)
+    recipe = run_code_generator(codegen_llm, findings, profile, user_query)
     display_recipe(recipe)
 
     # ------------------------------------------------------------------
