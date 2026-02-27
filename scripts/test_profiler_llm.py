@@ -320,11 +320,6 @@ def display_findings(findings: InvestigationFindings) -> None:
         for col, reason in findings.columns_to_drop_rationale.items():
             print(f"    {col}: {reason}")
 
-    if findings.feature_engineering_suggestions:
-        print(f"\n  Feature Engineering Suggestions:")
-        for s in findings.feature_engineering_suggestions:
-            print(f"    - {s}")
-
     if findings.key_caveats:
         print(f"\n  Key Caveats for Answer Agent:")
         for c in findings.key_caveats:
