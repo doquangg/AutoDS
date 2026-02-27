@@ -2,32 +2,28 @@
 # Agent definitions for the AutoDS pipeline.
 #
 # ARCHITECTURE:
-#   This file defines THREE agents, all powered by the SAME underlying LLM.
-#   They are differentiated only by their system prompts and output schemas.
+#   This file defines THREE agents, each using a dedicated OpenAI model.
+#   They are differentiated by their system prompts, output schemas, and models.
 #
-#   1. Investigator Agent  — Reads the profile, calls tools, produces 
-#                            InvestigationFindings (structured diagnosis).
+#   1. Investigator Agent   — Reads the profile, calls tools, produces
+#                             InvestigationFindings (structured diagnosis).
+#                             Default model: gpt-5-2025-08-07
 #   2. Code Generator Agent — Reads findings, writes CleaningRecipe (Python code).
-#                            This is the ONLY agent that retries on sandbox errors.
+#                             This is the ONLY agent that retries on sandbox errors.
+#                             Default model: gpt-4.1-2025-04-14
 #   3. Answer Agent         — Reads model results + findings, writes the final
-#                            natural language answer.
+#                             natural language answer.
+#                             Default model: gpt-4.1-2025-04-14
 #
-# SINGLE-LLM DESIGN:
-#   All three agents use `get_llm()` which returns one shared model instance.
-#   For local hosting, point this at your local server (Ollama, vLLM, etc.)
-#   via the OPENAI_API_BASE environment variable. LangChain's ChatOpenAI client
-#   works with any OpenAI-compatible API.
+# LLM CONFIGURATION:
+#   All agents use OpenAI's API. Set OPENAI_API_KEY in your environment.
+#   Model defaults can be overridden per-role via environment variables:
+#     INVESTIGATOR_MODEL  (default: gpt-5-2025-08-07)
+#     CODEGEN_MODEL       (default: gpt-4.1-2025-04-14)
+#     ANSWER_MODEL        (default: gpt-4.1-2025-04-14)
 #
-#   The key requirement for the investigator is reliable tool calling and 
-#   structured output. Models that work well:
-#     - Llama 3.1 70B+ (good tool calling)
-#     - Qwen 2.5 72B (strong structured output)
-#     - Mistral Large / Mixtral 8x22B
-#     - Any model that supports function calling via OpenAI-compatible API
-#
-#   Smaller models (7B-13B) will struggle with the investigator's multi-step
-#   reasoning and tool orchestration. The code generator is more forgiving
-#   since it receives explicit instructions and just needs to write pandas.
+#   To use a local OpenAI-compatible server (Ollama, vLLM, etc.), also set:
+#     OPENAI_API_BASE=http://localhost:8000/v1
 ################################################################################
 
 from __future__ import annotations
@@ -45,34 +41,37 @@ from core.tools import investigation_tools
 
 
 ################################################################################
-# Shared LLM Instance
+# Per-Role LLM Instances
 ################################################################################
 
-_llm_instance = None
+_llm_cache: dict[str, ChatOpenAI] = {}
 
-def get_llm() -> ChatOpenAI:
-    """
-    Returns a single shared LLM instance. Works with any OpenAI-compatible API.
-    
-    For local models, set environment variables:
-        OPENAI_API_BASE=http://localhost:8000/v1   (vLLM / Ollama / llama.cpp)
-        OPENAI_API_KEY=not-needed                   (placeholder for local)
-        MODEL_NAME=meta-llama/Llama-3.1-70B-Instruct
-    
-    For hosted models:
-        OPENAI_API_KEY=sk-...
-        MODEL_NAME=gpt-4o
-    """
-    global _llm_instance
-    if _llm_instance is None:
-        _llm_instance = ChatOpenAI(
-            model=os.environ.get("MODEL_NAME", "gpt-4o"),
+
+def _get_llm(model: str) -> ChatOpenAI:
+    """Returns a cached ChatOpenAI instance for the given model name."""
+    if model not in _llm_cache:
+        _llm_cache[model] = ChatOpenAI(
+            model=model,
             temperature=0.0,  # Deterministic for reproducibility
-            # These work for both OpenAI and local OpenAI-compatible servers
-            base_url=os.environ.get("OPENAI_API_BASE", None),
-            api_key=os.environ.get("OPENAI_API_KEY", "not-needed"),
+            base_url=os.environ.get("OPENAI_API_BASE"),  # None = use OpenAI
+            api_key=os.environ.get("OPENAI_API_KEY"),
         )
-    return _llm_instance
+    return _llm_cache[model]
+
+
+def get_investigator_llm() -> ChatOpenAI:
+    """Returns the LLM for the investigator agent (default: gpt-5-2025-08-07)."""
+    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5-2025-08-07"))
+
+
+def get_codegen_llm() -> ChatOpenAI:
+    """Returns the LLM for the code generator agent (default: gpt-4.1-2025-04-14)."""
+    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-4.1-2025-04-14"))
+
+
+def get_answer_llm() -> ChatOpenAI:
+    """Returns the LLM for the answer agent (default: gpt-4.1-2025-04-14)."""
+    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-4.1-2025-04-14"))
 
 
 ################################################################################
@@ -126,7 +125,6 @@ WHAT TO LOOK FOR:
 USE YOUR TOOLS to verify suspicions. Don't guess — inspect the actual data.
 But be efficient: don't call the same tool repeatedly with minor variations.
 
-You MUST respond with a valid InvestigationFindings JSON object.
 Do NOT write any Python code. Your job is diagnosis, not treatment.\
 """
 
@@ -140,8 +138,8 @@ def run_investigator_agent(state: AgentState) -> Dict[str, Any]:
     LangGraph's ToolNode handles execution. This function is called 
     repeatedly until the agent stops requesting tools.
     """
-    llm = get_llm()
-    
+    llm = get_investigator_llm()
+
     # Bind investigation tools so the LLM can call them
     llm_with_tools = llm.bind_tools(
         investigation_tools,
@@ -174,9 +172,10 @@ def run_investigator_agent(state: AgentState) -> Dict[str, Any]:
         ),
     }
     
-    # If the agent is done (no tool calls), parse the structured findings
+    # If the agent is done (no tool calls), extract structured findings
     if not getattr(response, "tool_calls", None):
-        findings = _parse_investigation_findings(response, llm)
+        structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
+        findings = structured_llm.invoke(messages + [response])
         updates["investigation_findings"] = findings
     
     return updates
@@ -204,7 +203,7 @@ def _parse_investigation_findings(
         pass
     
     # Approach 2: Ask the LLM to reformat its response as structured output
-    structured_llm = llm.with_structured_output(InvestigationFindings)
+    structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
     findings = structured_llm.invoke([
         SystemMessage(content=(
             "Convert the following data quality analysis into the exact "
@@ -270,8 +269,8 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
     Runs the code generator agent. Returns state updates including
     current_plan and codegen_messages.
     """
-    llm = get_llm()
-    structured_llm = llm.with_structured_output(CleaningRecipe)
+    llm = get_codegen_llm()
+    structured_llm = llm.with_structured_output(CleaningRecipe, method="function_calling")
     
     messages = []
     
@@ -365,8 +364,8 @@ def run_answer_agent(state: AgentState) -> str:
     """
     Runs the answer agent. Returns the final_answer string.
     """
-    llm = get_llm()
-    
+    llm = get_answer_llm()
+
     # Serialize model metadata
     model_meta = state.get("model_metadata", {})
     model_json = json.dumps(model_meta, indent=2, default=str)

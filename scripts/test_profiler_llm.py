@@ -15,12 +15,12 @@ would normally handle via ToolNode. This makes it possible to test and debug
 the agents without spinning up the full state machine.
 
 Configuration (environment variables):
-  VLLM_BASE_URL  Base URL of the vLLM server  (default: http://localhost:8000/v1)
-  VLLM_MODEL     Model name served by vLLM     (default: Qwen/Qwen3-4B-Instruct-2507)
+  OPENAI_API_KEY     OpenAI API key (required)
+  INVESTIGATOR_MODEL Model for the investigator agent (default: gpt-5-2025-08-07)
+  CODEGEN_MODEL      Model for the code generator agent (default: gpt-4.1-2025-04-14)
 
 Usage:
-  # Start your vLLM server first:
-  #   vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000
+  export OPENAI_API_KEY=sk-...
   python scripts/test_profiler_llm.py
 """
 
@@ -58,8 +58,8 @@ from core.tools import (  # noqa: E402
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
-VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
+INVESTIGATOR_MODEL = os.environ.get("INVESTIGATOR_MODEL", "gpt-5-2025-08-07")
+CODEGEN_MODEL = os.environ.get("CODEGEN_MODEL", "gpt-4.1-2025-04-14")
 DATA_PATH = (
     REPO_ROOT / "data" / "sample_data" / "healthcare"
     / "dirty_healthcare_visits_no_notes.csv"
@@ -113,7 +113,6 @@ WHAT TO LOOK FOR:
 USE YOUR TOOLS to verify suspicions. Don't guess — inspect the actual data.
 But be efficient: don't call the same tool repeatedly with minor variations.
 
-You MUST respond with a valid InvestigationFindings JSON object.
 Do NOT write any Python code. Your job is diagnosis, not treatment.\
 """
 
@@ -155,40 +154,6 @@ def _execute_tool_calls(tool_calls: list, tool_lookup: dict) -> list[ToolMessage
     return results
 
 
-def _parse_investigation_findings(
-    response: AIMessage, llm: ChatOpenAI
-) -> InvestigationFindings:
-    """
-    Extract structured InvestigationFindings from the investigator's final
-    response. Tries direct JSON parsing first, falls back to asking the LLM
-    to reformat into the schema.
-    """
-    content = response.content
-
-    # Approach 1: Parse JSON directly (LLM may wrap in code fences)
-    try:
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-
-        data = json.loads(content)
-        return InvestigationFindings(**data)
-    except (json.JSONDecodeError, ValueError, KeyError):
-        pass
-
-    # Approach 2: Ask the LLM to reformat as structured output
-    print("    (Direct JSON parse failed — asking LLM to reformat...)")
-    structured_llm = llm.with_structured_output(InvestigationFindings)
-    findings = structured_llm.invoke([
-        SystemMessage(content=(
-            "Convert the following data quality analysis into the exact "
-            "InvestigationFindings JSON schema. Preserve all information."
-        )),
-        HumanMessage(content=response.content),
-    ])
-    return findings
-
 
 def run_investigator(
     llm: ChatOpenAI,
@@ -229,9 +194,10 @@ def run_investigator(
         tool_calls = getattr(response, "tool_calls", None) or []
 
         if not tool_calls:
-            # Agent is done investigating — parse findings
+            # Agent is done investigating — extract structured findings
             print("    ✅ Investigator finished (no more tool calls).")
-            return _parse_investigation_findings(response, llm)
+            structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
+            return structured_llm.invoke(messages)
 
         # Execute tool calls and feed results back
         tool_call_count += len(tool_calls)
@@ -245,14 +211,8 @@ def run_investigator(
         if tool_call_count >= MAX_TOOL_CALLS:
             print(f"    ⚠️  Tool call limit reached ({MAX_TOOL_CALLS}). "
                   f"Forcing investigator to finalize.")
-            # Ask the LLM to wrap up without tools
-            messages.append(HumanMessage(content=(
-                "You have reached the tool call limit. Based on the evidence "
-                "gathered so far, produce your final InvestigationFindings JSON now. "
-                "Do not request any more tools."
-            )))
-            final_response = llm.invoke(messages)  # No tools bound
-            return _parse_investigation_findings(final_response, llm)
+            structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
+            return structured_llm.invoke(messages)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -310,7 +270,7 @@ def run_code_generator(
     Run the code generator agent. Takes investigation findings as input,
     returns a CleaningRecipe with executable Python steps.
     """
-    structured_llm = llm.with_structured_output(CleaningRecipe)
+    structured_llm = llm.with_structured_output(CleaningRecipe, method="function_calling")
 
     findings_json = json.dumps(findings.model_dump(), indent=2, default=str)
     profile_json = json.dumps(profile.model_dump(), indent=2, default=str)
@@ -420,14 +380,19 @@ def main() -> None:
           f"{len(profile.columns)} columns profiled.\n")
 
     # ------------------------------------------------------------------
-    # 3. Build LLM client (single instance for both agents)
+    # 3. Build LLM clients (one per agent role)
     # ------------------------------------------------------------------
-    print(f"Connecting to vLLM at: {VLLM_BASE_URL}")
-    print(f"  Model: {VLLM_MODEL}\n")
-    llm = ChatOpenAI(
-        base_url=VLLM_BASE_URL,
-        api_key="no-key",
-        model=VLLM_MODEL,
+    print(f"Using OpenAI API")
+    print(f"  Investigator model : {INVESTIGATOR_MODEL}")
+    print(f"  Code generator model: {CODEGEN_MODEL}\n")
+    investigator_llm = ChatOpenAI(
+        model=INVESTIGATOR_MODEL,
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        temperature=0.0,
+    )
+    codegen_llm = ChatOpenAI(
+        model=CODEGEN_MODEL,
+        api_key=os.environ.get("OPENAI_API_KEY"),
         temperature=0.0,
     )
 
@@ -445,7 +410,7 @@ def main() -> None:
     # NOTE: Input user query here
     user_query = "What patterns in patient visits predict high-cost outcomes?"
 
-    findings = run_investigator(llm, profile, user_query)
+    findings = run_investigator(investigator_llm, profile, user_query)
     display_findings(findings)
 
     # ------------------------------------------------------------------
@@ -456,7 +421,7 @@ def main() -> None:
     print("=" * 70)
     print("  Generating cleaning code based on investigation findings...\n")
 
-    recipe = run_code_generator(llm, findings, profile, user_query)
+    recipe = run_code_generator(codegen_llm, findings, profile, user_query)
     display_recipe(recipe)
 
     # ------------------------------------------------------------------
