@@ -125,7 +125,6 @@ WHAT TO LOOK FOR:
 USE YOUR TOOLS to verify suspicions. Don't guess — inspect the actual data.
 But be efficient: don't call the same tool repeatedly with minor variations.
 
-You MUST respond with a valid InvestigationFindings JSON object.
 Do NOT write any Python code. Your job is diagnosis, not treatment.\
 """
 
@@ -173,9 +172,10 @@ def run_investigator_agent(state: AgentState) -> Dict[str, Any]:
         ),
     }
     
-    # If the agent is done (no tool calls), parse the structured findings
+    # If the agent is done (no tool calls), extract structured findings
     if not getattr(response, "tool_calls", None):
-        findings = _parse_investigation_findings(response, llm)
+        structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
+        findings = structured_llm.invoke(messages + [response])
         updates["investigation_findings"] = findings
     
     return updates
@@ -203,7 +203,7 @@ def _parse_investigation_findings(
         pass
     
     # Approach 2: Ask the LLM to reformat its response as structured output
-    structured_llm = llm.with_structured_output(InvestigationFindings)
+    structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
     findings = structured_llm.invoke([
         SystemMessage(content=(
             "Convert the following data quality analysis into the exact "
@@ -270,7 +270,7 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
     current_plan and codegen_messages.
     """
     llm = get_codegen_llm()
-    structured_llm = llm.with_structured_output(CleaningRecipe)
+    structured_llm = llm.with_structured_output(CleaningRecipe, method="function_calling")
     
     messages = []
     
