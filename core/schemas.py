@@ -174,12 +174,6 @@ class InvestigationFindings(BaseModel):
         description="Mapping of column name -> reason for dropping."
     )
     
-    feature_engineering_suggestions: List[str] = Field(
-        default_factory=list,
-        description="Plain-English suggestions for derived features. "
-                    "E.g., 'Create days_since_last_purchase from last_purchase_date and today.'"
-    )
-    
     data_quality_score: float = Field(
         ..., description="Overall quality score 0.0 (unusable) to 1.0 (pristine). "
                          "Reflects severity and prevalence of violations."
