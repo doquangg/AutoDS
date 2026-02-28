@@ -62,7 +62,7 @@ from plugins.modeller import train_model
 # Configuration
 ################################################################################
 
-MAX_TOOL_CALLS = 10   # Cap on investigation tool calls to prevent runaway loops
+MAX_TOOL_CALLS = 30   # Cap on investigation tool calls to prevent runaway loops
 MAX_RETRIES = 3       # Max code generation retries on sandbox failure
 
 
@@ -76,7 +76,7 @@ def node_profiler(state: AgentState):
     Pure computation — no LLM involved.
     """
     print("--- [1] Profiling Data ---")
-    return {"profile": generate_profile(state["working_df"])}
+    return {"profile": generate_profile(state["working_df"], detailed_profiler=True)}
 
 
 def node_investigator(state: AgentState):
@@ -87,11 +87,11 @@ def node_investigator(state: AgentState):
     """
     tool_count = state.get("tool_call_count", 0)
     print(f"--- [2] Investigator (tool calls so far: {tool_count}) ---")
-    
+
     # Give tools access to the current DataFrame
     set_working_df(state["working_df"])
-    
-    return run_investigator_agent(state)
+
+    return run_investigator_agent(state, max_tool_calls=MAX_TOOL_CALLS)
 
 
 def node_code_generator(state: AgentState):
@@ -106,7 +106,6 @@ def node_code_generator(state: AgentState):
     print(f"--- [3] Code Generator (Retry: {retry}) ---")
     return run_codegen_agent(state)
 
-# FIXME (#4): Need to actually implement sandbox
 def node_sandbox(state: AgentState):
     """
     Executes the cleaning plan in an isolated sandbox.
@@ -161,10 +160,13 @@ def node_answer(state: AgentState):
     """
     LLM agent that generates a business-friendly answer using model results
     and data quality caveats from the investigation.
+
+    TODO: Currently stubbed — returns placeholder until AutoGluon is implemented.
+    Uncomment the real implementation when model_metadata contains real results.
     """
-    print("--- [6] Final Answer ---")
-    ans = run_answer_agent(state)
-    return {"final_answer": ans}
+    print("--- [6] Final Answer [STUB] ---")
+    # ans = run_answer_agent(state)
+    return {"final_answer": "Answer agent stubbed — AutoGluon not yet implemented."}
 
 
 ################################################################################
@@ -223,7 +225,7 @@ workflow = StateGraph(AgentState)
 # --- Nodes ---
 workflow.add_node("profiler",       node_profiler)
 workflow.add_node("investigator",   node_investigator)
-workflow.add_node("tools",          ToolNode(investigation_tools))
+workflow.add_node("tools",          ToolNode(investigation_tools, messages_key="investigator_messages"))
 workflow.add_node("code_generator", node_code_generator)
 workflow.add_node("sandbox",        node_sandbox)
 workflow.add_node("autogluon",      node_autogluon)

@@ -55,23 +55,24 @@ def _get_llm(model: str) -> ChatOpenAI:
             temperature=0.0,  # Deterministic for reproducibility
             base_url=os.environ.get("OPENAI_API_BASE"),  # None = use OpenAI
             api_key=os.environ.get("OPENAI_API_KEY"),
+            reasoning_effort="medium",
         )
     return _llm_cache[model]
 
 
 def get_investigator_llm() -> ChatOpenAI:
-    """Returns the LLM for the investigator agent (default: gpt-5-2025-08-07)."""
-    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5-2025-08-07"))
+    """Returns the LLM for the investigator agent (default: gpt-5.1-2025-11-13)."""
+    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5.1-2025-11-13"))
 
 
 def get_codegen_llm() -> ChatOpenAI:
-    """Returns the LLM for the code generator agent (default: gpt-4.1-2025-04-14)."""
-    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-4.1-2025-04-14"))
+    """Returns the LLM for the code generator agent (default: gpt-5.1-2025-11-13)."""
+    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-5.1-2025-11-13"))
 
 
 def get_answer_llm() -> ChatOpenAI:
-    """Returns the LLM for the answer agent (default: gpt-4.1-2025-04-14)."""
-    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-4.1-2025-04-14"))
+    """Returns the LLM for the answer agent (default: gpt-5.1-2025-11-13)."""
+    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-5.1-2025-11-13"))
 
 
 ################################################################################
@@ -129,30 +130,32 @@ Do NOT write any Python code. Your job is diagnosis, not treatment.\
 """
 
 
-def run_investigator_agent(state: AgentState) -> Dict[str, Any]:
+def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[str, Any]:
     """
-    Runs the investigator agent. Returns state updates including 
+    Runs the investigator agent. Returns state updates including
     investigation_findings and investigator_messages.
-    
+
     The investigator uses tools via LangChain's bind_tools(), which means
-    LangGraph's ToolNode handles execution. This function is called 
+    LangGraph's ToolNode handles execution. This function is called
     repeatedly until the agent stops requesting tools.
+
+    Args:
+        max_tool_calls: When the cumulative tool call count reaches this value,
+            findings are extracted immediately even if the LLM wanted more tools.
+            Pass MAX_TOOL_CALLS from graph.py to enforce the graph-level cap.
     """
     llm = get_investigator_llm()
 
     # Bind investigation tools so the LLM can call them
-    llm_with_tools = llm.bind_tools(
-        investigation_tools,
-        # Also allow structured output for the final response
-    )
+    llm_with_tools = llm.bind_tools(investigation_tools)
 
     # Build messages for this agent's context
     messages = list(state.get("investigator_messages", []))
-    
+
     # On first call (no messages yet), inject the system prompt and profile
     if not messages:
         profile_json = json.dumps(state["profile"], indent=2, default=str)
-        
+
         messages = [
             SystemMessage(content=INVESTIGATOR_SYSTEM_PROMPT),
             HumanMessage(content=(
@@ -163,21 +166,38 @@ def run_investigator_agent(state: AgentState) -> Dict[str, Any]:
         ]
 
     response = llm_with_tools.invoke(messages)
-    
-    # Return the new message(s) to append to investigator_messages
+
+    has_tool_calls = bool(getattr(response, "tool_calls", None))
+    new_tool_count = state.get("tool_call_count", 0) + len(
+        getattr(response, "tool_calls", []) or []
+    )
+    at_limit = new_tool_count >= max_tool_calls
+
     updates: Dict[str, Any] = {
         "investigator_messages": [response],
-        "tool_call_count": state.get("tool_call_count", 0) + len(
-            getattr(response, "tool_calls", []) or []
-        ),
+        "tool_call_count": new_tool_count,
     }
-    
-    # If the agent is done (no tool calls), extract structured findings
-    if not getattr(response, "tool_calls", None):
+
+    # Extract findings when: agent is done (no tool calls) OR limit is reached
+    if not has_tool_calls or at_limit:
         structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
-        findings = structured_llm.invoke(messages + [response])
+
+        if at_limit and has_tool_calls:
+            # Do NOT include the last AIMessage — it has unresolved tool_calls which
+            # the OpenAI API will reject (tool_calls must be followed by ToolMessages).
+            # Ask for findings based on the conversation history so far.
+            finalization_messages = messages + [
+                HumanMessage(content=(
+                    "Tool call limit reached. Based on your investigation so far, "
+                    "please provide your final InvestigationFindings."
+                ))
+            ]
+            findings = structured_llm.invoke(finalization_messages)
+        else:
+            findings = structured_llm.invoke(messages + [response])
+
         updates["investigation_findings"] = findings
-    
+
     return updates
 
 
