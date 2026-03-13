@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from core.graph import app  # noqa: E402
+from core.logger import setup_logger  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -42,6 +43,8 @@ USER_QUERY = "What patterns in patient visits predict high-cost outcomes?"
 
 
 def main() -> None:
+    setup_logger()
+
     # ------------------------------------------------------------------
     # 1. Load data
     # ------------------------------------------------------------------
@@ -59,6 +62,8 @@ def main() -> None:
         "working_df": df,
         "retry_count": 0,
         "tool_call_count": 0,
+        "pass_count": 0,
+        "is_data_clean": False,
     }
 
     print("=" * 70)
@@ -119,6 +124,19 @@ def main() -> None:
         succeeded = sum(1 for h in history if (h.status if hasattr(h, "status") else h.get("status")) == "SUCCESS")
         failed = sum(1 for h in history if (h.status if hasattr(h, "status") else h.get("status")) == "FAILED")
         print(f"\n  Sandbox execution   : {succeeded} steps succeeded, {failed} failed")
+
+    # Multi-pass summary
+    pass_count = result.get("pass_count", 0)
+    print(f"\n  Cleaning passes     : {pass_count}")
+    pass_history = result.get("pass_history", [])
+    if pass_history:
+        for ph in pass_history:
+            print(f"    Pass {ph['pass_number']}: quality={ph['quality_score']}, "
+                  f"violations={ph['violations_found']}, "
+                  f"steps={ph['steps_executed']}, "
+                  f"rows_after={ph['rows_after']}")
+    is_clean = result.get("is_data_clean", False)
+    print(f"  Data declared clean : {is_clean}")
 
     # Clean DataFrame
     clean_df = result.get("clean_df")

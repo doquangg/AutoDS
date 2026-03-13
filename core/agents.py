@@ -38,6 +38,10 @@ from langchain_openai import ChatOpenAI
 from core.state import AgentState
 from core.schemas import InvestigationFindings, CleaningRecipe
 from core.tools import investigation_tools
+from core.logger import (
+    log_llm_request, log_llm_response, log_investigation_findings,
+    log_cleaning_recipe,
+)
 
 
 ################################################################################
@@ -129,6 +133,31 @@ But be efficient: don't call the same tool repeatedly with minor variations.
 Do NOT write any Python code. Your job is diagnosis, not treatment.\
 """
 
+INVESTIGATOR_REEXAM_PROMPT = """\
+
+
+IMPORTANT: This is RE-EXAMINATION PASS {pass_number} of previously cleaned data.
+
+PREVIOUS PASSES:
+{pass_history_summary}
+
+Your job on this pass:
+1. Review the NEW profile of the cleaned data
+2. Check whether the previous cleaning actions were effective
+3. Look for NEW issues that may have been revealed by prior cleaning
+4. Look for issues that were MISSED in previous passes
+5. Do NOT re-flag issues that have already been successfully addressed
+
+CRITICAL: You MUST set is_data_clean to True if:
+- No CRITICAL violations remain
+- Remaining issues are cosmetic or would not meaningfully affect model quality
+- The data_quality_score is >= 0.85
+
+Set is_data_clean to False ONLY if there are substantive issues that warrant \
+another cleaning pass. Be conservative about requesting additional passes — \
+diminishing returns are real.\
+"""
+
 
 def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[str, Any]:
     """
@@ -138,6 +167,10 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
     The investigator uses tools via LangChain's bind_tools(), which means
     LangGraph's ToolNode handles execution. This function is called
     repeatedly until the agent stops requesting tools.
+
+    On pass > 0 (multi-pass re-examination), the system prompt is augmented
+    with context about previous passes so the investigator can judge whether
+    the data is now clean enough.
 
     Args:
         max_tool_calls: When the cumulative tool call count reaches this value,
@@ -155,19 +188,53 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
     # On first call (no messages yet), inject the system prompt and profile
     if not messages:
         profile_json = json.dumps(state["profile"], indent=2, default=str)
+        pass_count = state.get("pass_count", 0)
 
+        system_prompt = INVESTIGATOR_SYSTEM_PROMPT
+
+        # On subsequent passes, append re-examination context
+        if pass_count > 0:
+            pass_history = state.get("pass_history", [])
+            history_lines = []
+            for ph in pass_history:
+                history_lines.append(
+                    f"  Pass {ph['pass_number']}: {ph['violations_found']} violations found, "
+                    f"quality={ph['quality_score']}, {ph['steps_executed']} steps executed, "
+                    f"{ph['rows_after']} rows remaining"
+                )
+            pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
+
+            system_prompt += INVESTIGATOR_REEXAM_PROMPT.format(
+                pass_number=pass_count + 1,
+                pass_history_summary=pass_history_summary,
+            )
+
+        user_content = (
+            f"USER QUERY: {state['user_query']}\n\n"
+            f"{'RE-EXAMINATION ' if pass_count > 0 else ''}"
+            f"DATASET PROFILE ({state['profile']['row_count']} rows):\n"
+            f"{profile_json}"
+        )
         messages = [
-            SystemMessage(content=INVESTIGATOR_SYSTEM_PROMPT),
-            HumanMessage(content=(
-                f"USER QUERY: {state['user_query']}\n\n"
-                f"DATASET PROFILE ({state['profile']['row_count']} rows):\n"
-                f"{profile_json}"
-            )),
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_content),
         ]
+
+        log_llm_request(
+            "investigator", pass_count=pass_count,
+            message_count=len(messages),
+            system_prompt_snippet=system_prompt,
+            user_message_snippet=user_content,
+        )
 
     response = llm_with_tools.invoke(messages)
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
+    log_llm_response(
+        "investigator",
+        content=response.content if isinstance(response.content, str) else str(response.content),
+        tool_calls=getattr(response, "tool_calls", None),
+    )
     new_tool_count = state.get("tool_call_count", 0) + len(
         getattr(response, "tool_calls", []) or []
     )
@@ -182,20 +249,26 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
     if not has_tool_calls or at_limit:
         structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
 
+        # Build finalization messages with explicit extraction prompt.
+        # If at_limit with pending tool_calls, exclude the last AIMessage
+        # (OpenAI rejects tool_calls not followed by ToolMessages).
         if at_limit and has_tool_calls:
-            # Do NOT include the last AIMessage — it has unresolved tool_calls which
-            # the OpenAI API will reject (tool_calls must be followed by ToolMessages).
-            # Ask for findings based on the conversation history so far.
-            finalization_messages = messages + [
-                HumanMessage(content=(
-                    "Tool call limit reached. Based on your investigation so far, "
-                    "please provide your final InvestigationFindings."
-                ))
-            ]
-            findings = structured_llm.invoke(finalization_messages)
+            finalization_messages = messages
         else:
-            findings = structured_llm.invoke(messages + [response])
+            finalization_messages = messages + [response]
 
+        finalization_messages = finalization_messages + [
+            HumanMessage(content=(
+                "Based on your complete investigation above, provide your final "
+                "InvestigationFindings. Include ALL violations you identified, "
+                "with accurate severity, category, and evidence. Set data_quality_score "
+                "to reflect the actual state of the data. If this is a re-examination "
+                "pass, only flag issues that still exist in the current data."
+            ))
+        ]
+        findings = structured_llm.invoke(finalization_messages)
+
+        log_investigation_findings(findings)
         updates["investigation_findings"] = findings
 
     return updates
@@ -338,8 +411,17 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
             )),
         ]
 
+    log_llm_request(
+        "codegen", pass_count=state.get("pass_count", 0),
+        is_retry=is_retry, retry_count=state.get("retry_count", 0),
+        message_count=len(messages),
+        system_prompt_snippet=messages[0].content if messages else "",
+        user_message_snippet=messages[1].content if len(messages) > 1 else "",
+    )
+
     recipe = structured_llm.invoke(messages)
-    
+    log_cleaning_recipe(recipe)
+
     return {
         "current_plan": recipe,
         "codegen_messages": messages + [

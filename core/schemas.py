@@ -175,7 +175,7 @@ class InvestigationFindings(BaseModel):
     )
     
     data_quality_score: float = Field(
-        ..., description="Overall quality score 0.0 (unusable) to 1.0 (pristine). "
+        0.0, description="Overall quality score 0.0 (unusable) to 1.0 (pristine). "
                          "Reflects severity and prevalence of violations."
     )
     
@@ -183,6 +183,15 @@ class InvestigationFindings(BaseModel):
         default_factory=list,
         description="Important caveats the answer agent should mention when presenting results. "
                     "E.g., 'Income column was 40% sentinel values — predictions involving income may be unreliable.'"
+    )
+
+    is_data_clean: bool = Field(
+        False,
+        description=(
+            "Set to True if the data is clean enough for modeling and no further "
+            "cleaning passes are needed. True when: no CRITICAL violations remain, "
+            "data_quality_score >= 0.85, and remaining issues are cosmetic or minor."
+        )
     )
 
 
