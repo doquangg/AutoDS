@@ -24,6 +24,7 @@ from core.schemas import (
     NullCoOccurrenceInput,
     CorrelationScanInput,
 )
+from core.logger import log_tool_call
 
 # ---------------------------------------------------------------------------
 # Module-level DataFrame reference. Set by the graph node before the
@@ -66,16 +67,22 @@ def inspect_rows(query: str, limit: int = 5) -> str:
     try:
         filtered = df.query(query).head(limit)
     except Exception as e:
-        return f"Query failed: {e}"
+        result = f"Query failed: {e}"
+        log_tool_call("inspect_rows", {"query": query, "limit": limit}, result)
+        return result
 
     if filtered.empty:
-        return f"No rows match the query: {query}"
+        result = f"No rows match the query: {query}"
+        log_tool_call("inspect_rows", {"query": query, "limit": limit}, result)
+        return result
 
-    return (
+    result = (
         f"Found {len(df.query(query))} total rows matching '{query}'. "
         f"Showing first {len(filtered)}:\n\n"
         f"{filtered.to_string(max_colwidth=40)}"
     )
+    log_tool_call("inspect_rows", {"query": query, "limit": limit}, result)
+    return result
 
 
 @tool("cross_column_frequency", args_schema=CrossColumnFrequencyInput)
@@ -87,8 +94,11 @@ def cross_column_frequency(col_a: str, col_b: str, top_n: int = 10) -> str:
     status='Active' + salary=0.
     """
     df = _get_df()
+    params = {"col_a": col_a, "col_b": col_b, "top_n": top_n}
     if col_a not in df.columns or col_b not in df.columns:
-        return f"Column not found. Available: {list(df.columns)}"
+        result = f"Column not found. Available: {list(df.columns)}"
+        log_tool_call("cross_column_frequency", params, result)
+        return result
 
     # Build crosstab, flatten to top pairs
     ct = pd.crosstab(df[col_a], df[col_b])
@@ -101,7 +111,9 @@ def cross_column_frequency(col_a: str, col_b: str, top_n: int = 10) -> str:
     )
     total = len(df)
     pairs["pct"] = (pairs["count"] / total * 100).round(2)
-    return pairs.to_string(index=False)
+    result = pairs.to_string(index=False)
+    log_tool_call("cross_column_frequency", params, result)
+    return result
 
 
 @tool("temporal_ordering_check", args_schema=TemporalOrderingCheckInput)
@@ -117,6 +129,9 @@ def temporal_ordering_check(
     if date_col_a not in df.columns or date_col_b not in df.columns:
         return f"Column not found. Available: {list(df.columns)}"
 
+    params = {"date_col_a": date_col_a, "date_col_b": date_col_b,
+              "sample_violations": sample_violations}
+
     a = pd.to_datetime(df[date_col_a], errors="coerce")
     b = pd.to_datetime(df[date_col_b], errors="coerce")
 
@@ -124,7 +139,9 @@ def temporal_ordering_check(
     valid_mask = a.notna() & b.notna()
     valid_count = int(valid_mask.sum())
     if valid_count == 0:
-        return "No rows have valid dates in both columns — cannot check ordering."
+        result = "No rows have valid dates in both columns — cannot check ordering."
+        log_tool_call("temporal_ordering_check", params, result)
+        return result
 
     violations = a[valid_mask] > b[valid_mask]
     violation_count = int(violations.sum())
@@ -139,6 +156,7 @@ def temporal_ordering_check(
         sample = df[valid_mask][violations].head(sample_violations)
         result += f"\nSample violating rows:\n{sample[[date_col_a, date_col_b]].to_string()}"
 
+    log_tool_call("temporal_ordering_check", params, result)
     return result
 
 
@@ -150,13 +168,18 @@ def value_distribution(column: str, bins: int = 20) -> str:
     counts. Use this to spot sentinel spikes, multimodal distributions, or 
     outlier clusters.
     """
+    params = {"column": column, "bins": bins}
     df = _get_df()
     if column not in df.columns:
-        return f"Column '{column}' not found. Available: {list(df.columns)}"
+        result = f"Column '{column}' not found. Available: {list(df.columns)}"
+        log_tool_call("value_distribution", params, result)
+        return result
 
     series = df[column].dropna()
     if series.empty:
-        return f"Column '{column}' is entirely null."
+        result = f"Column '{column}' is entirely null."
+        log_tool_call("value_distribution", params, result)
+        return result
 
     # Numeric: histogram
     if pd.api.types.is_numeric_dtype(series):
@@ -166,7 +189,9 @@ def value_distribution(column: str, bins: int = 20) -> str:
             lo, hi = edges[i], edges[i + 1]
             bar = "█" * min(int(count / max(counts) * 30), 30)
             lines.append(f"  [{lo:>10.2f}, {hi:>10.2f}) {count:>6d} {bar}")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        log_tool_call("value_distribution", params, result)
+        return result
 
     # Categorical: value counts
     vc = series.value_counts().head(25)
@@ -176,7 +201,9 @@ def value_distribution(column: str, bins: int = 20) -> str:
         lines.append(f"  {val!s:<30s} {count:>6d} ({pct:.1f}%)")
     if series.nunique() > 25:
         lines.append(f"  ... and {series.nunique() - 25} more unique values")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    log_tool_call("value_distribution", params, result)
+    return result
 
 
 @tool("null_co_occurrence", args_schema=NullCoOccurrenceInput)
@@ -186,12 +213,15 @@ def null_co_occurrence(threshold: float = 0.5) -> str:
     indicates systematic missingness — e.g., all address fields null together
     means the entire address record is missing, not just individual fields.
     """
+    params = {"threshold": threshold}
     df = _get_df()
     null_matrix = df.isnull()
     null_cols = [c for c in df.columns if null_matrix[c].any()]
 
     if len(null_cols) < 2:
-        return "Fewer than 2 columns have any nulls — nothing to compare."
+        result = "Fewer than 2 columns have any nulls — nothing to compare."
+        log_tool_call("null_co_occurrence", params, result)
+        return result
 
     pairs = []
     for i, col_a in enumerate(null_cols):
@@ -204,13 +234,17 @@ def null_co_occurrence(threshold: float = 0.5) -> str:
                     pairs.append((col_a, col_b, int(both_null), round(ratio, 3)))
 
     if not pairs:
-        return f"No column pairs have null co-occurrence above {threshold}."
+        result = f"No column pairs have null co-occurrence above {threshold}."
+        log_tool_call("null_co_occurrence", params, result)
+        return result
 
     pairs.sort(key=lambda x: x[3], reverse=True)
     lines = [f"Null co-occurrence pairs (threshold={threshold}):"]
     for col_a, col_b, count, ratio in pairs[:20]:
         lines.append(f"  {col_a} <-> {col_b}: {count} rows both null (overlap={ratio})")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    log_tool_call("null_co_occurrence", params, result)
+    return result
 
 
 @tool("correlation_scan", args_schema=CorrelationScanInput)
@@ -221,14 +255,19 @@ def correlation_scan(target_column: str, top_n: int = 10) -> str:
     query, and to prioritize cleaning efforts on high-signal columns.
     Only works for numeric columns.
     """
+    params = {"target_column": target_column, "top_n": top_n}
     df = _get_df()
     if target_column not in df.columns:
-        return f"Column '{target_column}' not found. Available: {list(df.columns)}"
+        result = f"Column '{target_column}' not found. Available: {list(df.columns)}"
+        log_tool_call("correlation_scan", params, result)
+        return result
 
     # Select numeric columns only
     numeric_df = df.select_dtypes(include=[np.number])
     if target_column not in numeric_df.columns:
-        return f"Column '{target_column}' is not numeric — cannot compute correlation."
+        result = f"Column '{target_column}' is not numeric — cannot compute correlation."
+        log_tool_call("correlation_scan", params, result)
+        return result
 
     corr = numeric_df.corr()[target_column].drop(target_column, errors="ignore")
     top = corr.abs().sort_values(ascending=False).head(top_n)
@@ -238,7 +277,9 @@ def correlation_scan(target_column: str, top_n: int = 10) -> str:
         actual = corr[col]
         direction = "+" if actual > 0 else "-"
         lines.append(f"  {col:<30s} {direction}{abs_val:.4f}")
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    log_tool_call("correlation_scan", params, result)
+    return result
 
 
 # ---------------------------------------------------------------------------

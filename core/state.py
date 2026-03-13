@@ -6,10 +6,14 @@
 #   1. Investigator and Code Generator use SEPARATE message lists. This prevents
 #      investigation context from polluting code-generation retries, and keeps
 #      each agent's context window focused.
-#   2. InvestigationFindings is a structured artifact that persists across 
-#      code-gen retries. The investigator runs ONCE; only the code generator
-#      retries on sandbox failure.
+#   2. InvestigationFindings is a structured artifact that persists across
+#      code-gen retries. The investigator runs ONCE per pass; only the code
+#      generator retries on sandbox failure.
 #   3. tool_call_count caps runaway investigation tool loops.
+#   4. Multi-pass: the profiler → investigator → codegen → sandbox cycle repeats
+#      until the investigator declares the data clean or MAX_PASSES is reached.
+#      Message lists use a resettable reducer so they can be cleared between
+#      passes while still supporting append within a single pass.
 ################################################################################
 
 import operator
@@ -26,6 +30,19 @@ from core.schemas import (
 )
 
 
+def _resettable_list_reducer(existing: list, new: list) -> list:
+    """
+    List reducer that supports reset between passes.
+
+    Normally appends (like operator.add). But if the new list starts with the
+    string "__RESET__", the existing list is discarded and replaced with
+    everything after the sentinel.
+    """
+    if new and isinstance(new[0], str) and new[0] == "__RESET__":
+        return list(new[1:])
+    return existing + new
+
+
 class AgentState(TypedDict):
     # --- Inputs ---
     user_query: str
@@ -38,16 +55,18 @@ class AgentState(TypedDict):
     # --- Investigator Agent Context ---
     # These messages are ONLY used by the investigator agent and its tool loop.
     # They are not touched by the code generator or answer agent.
-    investigator_messages: Annotated[List[BaseMessage], operator.add]
+    # Uses resettable reducer: cleared between passes, appended within a pass.
+    investigator_messages: Annotated[List[BaseMessage], _resettable_list_reducer]
 
     # --- Code Generator Agent Context ---
     # Separate message list for the code generator. On retry, we can trim this
     # without losing investigation context.
-    codegen_messages: Annotated[List[BaseMessage], operator.add]
+    # Uses resettable reducer: cleared between passes, appended within a pass.
+    codegen_messages: Annotated[List[BaseMessage], _resettable_list_reducer]
 
     # --- Cleaning Artifacts ---
     profile: Optional[DatasetProfile]
-    investigation_findings: Optional[InvestigationFindings]  # NEW: structured handoff
+    investigation_findings: Optional[InvestigationFindings]
     current_plan: Optional[CleaningRecipe]
 
     # --- Audit Trail ---
@@ -56,5 +75,10 @@ class AgentState(TypedDict):
     # --- Control Flow ---
     retry_count: int
     latest_error: Optional[str]
-    tool_call_count: int            # NEW: caps investigation tool loops
+    tool_call_count: int            # Caps investigation tool loops
     final_answer: Optional[str]
+
+    # --- Multi-Pass Control ---
+    pass_count: int                 # Current pass number (0-indexed, incremented after sandbox success)
+    is_data_clean: bool             # Set by investigator when no further cleaning needed
+    pass_history: Annotated[List[Dict[str, Any]], operator.add]  # Compact per-pass summaries
