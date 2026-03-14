@@ -98,9 +98,7 @@ You are a senior data quality analyst. Your job is to examine a dataset profile 
 and identify every semantic data quality issue that could corrupt a machine \
 learning model.
 
-You will receive:
-1. The user's question (what they want to predict/answer)
-2. A statistical profile of every column in the dataset
+You will receive a statistical profile of every column in the dataset.
 
 Your task:
 - If a CONFIRMED TARGET COLUMN is provided, use it as a given fact — do NOT \
@@ -144,8 +142,8 @@ Your output will be parsed as structured JSON — any prose will cause errors.\
 
 INVESTIGATOR_REEXAM_PROMPT = """\
 
-
 IMPORTANT: This is RE-EXAMINATION PASS {pass_number} of previously cleaned data.
+IMPORTANT: The confirmed target column is {target_column}"
 
 PREVIOUS PASSES:
 {pass_history_summary}
@@ -221,6 +219,7 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
             system_prompt += INVESTIGATOR_REEXAM_PROMPT.format(
                 pass_number=pass_count + 1,
                 pass_history_summary=pass_history_summary,
+                target_column=state.get("target_column") or "not yet confirmed",
             )
 
         # Include confirmed target column if set by human-in-the-loop selection
