@@ -52,10 +52,11 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.messages import AIMessage
 
 # Local Imports
-from core.state import AgentState
-from core.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
-from core.sandbox import execute_cleaning_plan
-from core.tools import investigation_tools, set_working_df
+from core.pipeline.state import AgentState
+from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
+from core.agents.target_selector import select_target_column
+from core.runtime.sandbox import execute_cleaning_plan
+from core.runtime.tools import investigation_tools, set_working_df
 from core.logger import log_node, log_routing, log_profile_summary
 from plugins.profiler import generate_profile
 from plugins.modeller import train_model
@@ -84,6 +85,16 @@ def node_profiler(state: AgentState):
     profile = generate_profile(state["working_df"], detailed_profiler=True)
     log_profile_summary(profile)
     return {"profile": profile}
+
+
+def node_target_selector(state: AgentState):
+    """
+    Human-in-the-loop target column selection.
+    On pass 0: ranks candidates via LLM, prompts user to confirm.
+    On pass > 0: no-op (target persists in state).
+    """
+    print("--- [1.5] Target Column Selection ---")
+    return select_target_column(state)
 
 
 def node_investigator(state: AgentState):
@@ -208,14 +219,15 @@ def node_autogluon(state: AgentState):
     """Trains an ML model using AutoGluon on the cleaned data."""
     print("--- [5] AutoGluon Modeling ---")
     
-    # Use the target column identified by the investigator, if available
-    findings = state.get("investigation_findings")
-    target_col = None
-    if findings:
-        target_data = (
-            findings.model_dump() if hasattr(findings, "model_dump") else findings
-        )
-        target_col = target_data.get("target_column")
+    # Prefer human-confirmed target column; fall back to investigator's choice
+    target_col = state.get("target_column")
+    if not target_col:
+        findings = state.get("investigation_findings")
+        if findings:
+            target_data = (
+                findings.model_dump() if hasattr(findings, "model_dump") else findings
+            )
+            target_col = target_data.get("target_column")
     
     metadata = train_model(
         state["clean_df"], 
@@ -350,8 +362,9 @@ def route_sandbox(state: AgentState):
 workflow = StateGraph(AgentState)
 
 # --- Nodes ---
-workflow.add_node("profiler",       node_profiler)
-workflow.add_node("investigator",   node_investigator)
+workflow.add_node("profiler",          node_profiler)
+workflow.add_node("target_selector",   node_target_selector)
+workflow.add_node("investigator",      node_investigator)
 workflow.add_node("tools",          ToolNode(investigation_tools, messages_key="investigator_messages"))
 workflow.add_node("code_generator", node_code_generator)
 workflow.add_node("sandbox",        node_sandbox)
@@ -360,9 +373,10 @@ workflow.add_node("autogluon",      node_autogluon)
 workflow.add_node("answer_agent",   node_answer)
 
 # --- Edges ---
-# Linear flow: START → profiler → investigator
+# Linear flow: START → profiler → target_selector → investigator
 workflow.add_edge(START, "profiler")
-workflow.add_edge("profiler", "investigator")
+workflow.add_edge("profiler", "target_selector")
+workflow.add_edge("target_selector", "investigator")
 
 # Investigator: tool loop, clean check, or proceed to code_generator
 workflow.add_conditional_edges(
