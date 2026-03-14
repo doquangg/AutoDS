@@ -21,8 +21,8 @@ from typing import Any, Dict, List
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 
-from core.state import AgentState
-from core.agents import get_investigator_llm
+from core.pipeline.state import AgentState
+from core.agents.agents import get_investigator_llm
 from core.logger import log_node
 
 

@@ -52,11 +52,11 @@ from langgraph.prebuilt import ToolNode
 from langchain_core.messages import AIMessage
 
 # Local Imports
-from core.state import AgentState
-from core.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
-from core.target_selector import select_target_column
-from core.sandbox import execute_cleaning_plan
-from core.tools import investigation_tools, set_working_df
+from core.pipeline.state import AgentState
+from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
+from core.agents.target_selector import select_target_column
+from core.runtime.sandbox import execute_cleaning_plan
+from core.runtime.tools import investigation_tools, set_working_df
 from core.logger import log_node, log_routing, log_profile_summary
 from plugins.profiler import generate_profile
 from plugins.modeller import train_model
