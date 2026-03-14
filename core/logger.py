@@ -20,10 +20,13 @@ logger = logging.getLogger("autods")
 _full_verbose: bool = False
 
 
-def setup_logger() -> None:
+def setup_logger(log_file: str | None = None) -> None:
     """
     Configure the autods logger based on AUTODS_VERBOSE env var.
     Call once at startup before any pipeline work.
+
+    If log_file is provided, verbose logs are also written there whenever
+    AUTODS_VERBOSE enables verbose mode.
 
     Values:
         AUTODS_VERBOSE=1     — verbose mode (truncation enabled)
@@ -42,7 +45,15 @@ def setup_logger() -> None:
     ))
 
     logger.setLevel(level)
+    logger.handlers.clear()
     logger.addHandler(handler)
+    if log_file and verbose and verbose != "0":
+        file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler.setFormatter(logging.Formatter(
+            "[%(asctime)s] %(levelname)s %(name)s | %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        logger.addHandler(file_handler)
     logger.propagate = False
 
 

@@ -19,4 +19,5 @@ python scripts/run_graph.py (no change in output) # default
 AUTODS_VERBOSE=1 python scripts/run_graph.py # verbose output, with truncation
 AUTODS_VERBOSE=full python scripts/run_graph.py # verbose output, no truncation
 ```
-Append `2>verbose.log` to the end of the line to output to `verbose.log`
+When verbose mode is enabled, logger output is automatically written to `output/verbose.log`.
+If you also want shell-level stderr redirection, you can still append `2>output/verbose.log`.
