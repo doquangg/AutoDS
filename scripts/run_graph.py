@@ -38,12 +38,14 @@ DATA_PATH = (
 )
 OUTPUT_DIR = REPO_ROOT / "output"
 OUTPUT_CSV = OUTPUT_DIR / "cleaned_data.csv"
+OUTPUT_VERBOSE_LOG = OUTPUT_DIR / "verbose.log"
 
 USER_QUERY = "What patterns in patient visits predict high-cost outcomes?"
 
 
 def main() -> None:
-    setup_logger()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    setup_logger(log_file=str(OUTPUT_VERBOSE_LOG))
 
     # ------------------------------------------------------------------
     # 1. Load data
@@ -147,7 +149,6 @@ def main() -> None:
         print(f"\n  Clean DataFrame     : {len(clean_df)} rows x {len(clean_df.columns)} columns")
 
         # Save to CSV
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         clean_df.to_csv(OUTPUT_CSV, index=False)
         print(f"  Saved to            : {OUTPUT_CSV}")
     else:

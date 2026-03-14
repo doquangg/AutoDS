@@ -211,3 +211,6 @@ __marimo__/
 
 # Outputs from AutoDS
 output/
+
+# Other stuff we don't need
+.vscode
