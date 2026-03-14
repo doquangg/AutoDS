@@ -109,7 +109,6 @@ answers the user's question.
 - Find ALL semantic violations in the data
 - Classify each violation by severity and category
 - Provide specific evidence from the profile for each finding
-- Suggest plain-English fixes (NOT code — just intent)
 - Assess overall data quality (0.0 to 1.0)
 - Note any caveats that should accompany the final answer
 
@@ -134,6 +133,13 @@ USE YOUR TOOLS to verify suspicions. Don't guess — inspect the actual data.
 But be efficient: don't call the same tool repeatedly with minor variations.
 
 Do NOT write any Python code. Your job is diagnosis, not treatment.\
+
+OUTPUT FORMAT:
+- When you need more information, call tools. Do NOT narrate your findings \
+in text — just call the next tool.
+- When you are done investigating, respond with your InvestigationFindings \
+directly. Do NOT write summaries, recommendations, or ask the user questions. \
+Your output will be parsed as structured JSON — any prose will cause errors.\
 """
 
 INVESTIGATOR_REEXAM_PROMPT = """\
@@ -182,8 +188,13 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
     """
     llm = get_investigator_llm()
 
-    # Bind investigation tools so the LLM can call them
-    llm_with_tools = llm.bind_tools(investigation_tools)
+    # Bind investigation tools so the LLM can call them, and fix the response
+    # format
+    llm_with_tools = llm.bind_tools(
+        investigation_tools,
+        response_format=InvestigationFindings,
+        strict=True,
+    )
 
     # Build messages for this agent's context
     messages = list(state.get("investigator_messages", []))
@@ -258,32 +269,33 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
         "tool_call_count": new_tool_count,
     }
 
-    # Extract findings when: agent is done (no tool calls) OR limit is reached
     if not has_tool_calls or at_limit:
-        structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
-
-        # Build finalization messages with explicit extraction prompt.
-        # If at_limit with pending tool_calls, exclude the last AIMessage
-        # (OpenAI rejects tool_calls not followed by ToolMessages).
         if at_limit and has_tool_calls:
-            finalization_messages = messages
+            # Model wanted more tools but hit the cap.
+            # Force a structured-only call (no tools) to extract findings.
+            structured_only = llm.with_structured_output(
+                InvestigationFindings, method="function_calling"
+            )
+            finalization_messages = messages + [
+                HumanMessage(content=(
+                    "Tool call limit reached. Based on your investigation so far, "
+                    "provide your final InvestigationFindings."
+                ))
+            ]
+            findings = structured_only.invoke(finalization_messages)
         else:
-            finalization_messages = messages + [response]
-
-        finalization_messages = finalization_messages + [
-            HumanMessage(content=(
-                "Based on your complete investigation above, provide your final "
-                "InvestigationFindings. Include ALL violations you identified, "
-                "with accurate severity, category, and evidence. Set data_quality_score "
-                "to reflect the actual state of the data. If this is a re-examination "
-                "pass, only flag issues that still exist in the current data."
-            ))
-        ]
-        findings = structured_llm.invoke(finalization_messages)
-
+            # Normal case: response.content is already InvestigationFindings JSON.
+            # Parse it directly — no second LLM call needed.
+            parsed = response.additional_kwargs.get("parsed")
+            if parsed and isinstance(parsed, InvestigationFindings):
+                findings = parsed
+            else:
+                content = response.content
+                data = json.loads(content)
+                findings = InvestigationFindings(**data)
+    
         log_investigation_findings(findings)
         updates["investigation_findings"] = findings
-
     return updates
 
 
