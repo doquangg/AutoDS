@@ -91,7 +91,8 @@ def get_answer_llm() -> ChatOpenAI:
 
 # FIXME (#19):
 # Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded. Update script to read prompt from some directory.
+# they were vibecoded. Update script to read prompt from some directory. This
+# prompt kinda sucks.
 INVESTIGATOR_SYSTEM_PROMPT = """\
 You are a senior data quality analyst. Your job is to examine a dataset profile \
 and identify every semantic data quality issue that could corrupt a machine \
@@ -284,39 +285,6 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
         updates["investigation_findings"] = findings
 
     return updates
-
-
-def _parse_investigation_findings(
-    response: AIMessage, llm: ChatOpenAI
-) -> InvestigationFindings:
-    """
-    Extract structured InvestigationFindings from the agent's final response.
-    Uses with_structured_output if available, otherwise parses JSON from text.
-    """
-    # Approach 1: Try parsing JSON directly from the response text
-    content = response.content
-    try:
-        # The LLM might wrap JSON in markdown code fences
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-        
-        data = json.loads(content)
-        return InvestigationFindings(**data)
-    except (json.JSONDecodeError, ValueError, KeyError):
-        pass
-    
-    # Approach 2: Ask the LLM to reformat its response as structured output
-    structured_llm = llm.with_structured_output(InvestigationFindings, method="function_calling")
-    findings = structured_llm.invoke([
-        SystemMessage(content=(
-            "Convert the following data quality analysis into the exact "
-            "InvestigationFindings JSON schema. Preserve all information."
-        )),
-        HumanMessage(content=response.content),
-    ])
-    return findings
 
 
 ################################################################################
