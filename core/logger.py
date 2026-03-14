@@ -38,7 +38,11 @@ def setup_logger(log_file: str | None = None) -> None:
     _full_verbose = verbose == "full"
     level = logging.DEBUG if verbose and verbose != "0" else logging.WARNING
 
+    is_verbose_enabled = bool(verbose and verbose != "0")
+    stream_level = logging.WARNING if (log_file and is_verbose_enabled) else level
+
     handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(stream_level)
     handler.setFormatter(logging.Formatter(
         "[%(asctime)s] %(levelname)s %(name)s | %(message)s",
         datefmt="%H:%M:%S",
@@ -47,8 +51,9 @@ def setup_logger(log_file: str | None = None) -> None:
     logger.setLevel(level)
     logger.handlers.clear()
     logger.addHandler(handler)
-    if log_file and verbose and verbose != "0":
+    if log_file and is_verbose_enabled:
         file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler.setLevel(level)
         file_handler.setFormatter(logging.Formatter(
             "[%(asctime)s] %(levelname)s %(name)s | %(message)s",
             datefmt="%H:%M:%S",

@@ -47,6 +47,10 @@
 ################################################################################
 
 # Library Imports
+import io
+import os
+from contextlib import redirect_stderr
+
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_core.messages import AIMessage
@@ -82,7 +86,15 @@ def node_profiler(state: AgentState):
     Pure computation — no LLM involved.
     """
     print("--- [1] Profiling Data ---")
-    profile = generate_profile(state["working_df"], detailed_profiler=True)
+    verbose = os.environ.get("AUTODS_VERBOSE", "").strip().lower()
+    is_verbose_enabled = bool(verbose and verbose != "0")
+    if is_verbose_enabled:
+        # ydata and related libraries may still emit progress to stderr in some paths.
+        # Keep terminal clean in verbose mode because detailed logs are persisted to file.
+        with redirect_stderr(io.StringIO()):
+            profile = generate_profile(state["working_df"], detailed_profiler=True)
+    else:
+        profile = generate_profile(state["working_df"], detailed_profiler=True)
     log_profile_summary(profile)
     return {"profile": profile}
 

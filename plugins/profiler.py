@@ -298,6 +298,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[
         SAMPLE_N = 10_000
         COL_CAP = 200
 
+        # FIXME: This needs to be better considered...
         TIME_BUDGET_SEC = 8.0  # soft budget; if exceeded, treat as fallback
         if df.shape[1] <= COL_CAP:
             df_y = df
