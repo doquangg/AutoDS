@@ -36,7 +36,7 @@ DATA_PATH = (
     REPO_ROOT / "data" / "sample_data" / "healthcare"
     / "dirty_healthcare_visits_no_notes.csv"
 )
-OUTPUT_DIR = REPO_ROOT / "data" / "output"
+OUTPUT_DIR = REPO_ROOT / "output"
 OUTPUT_CSV = OUTPUT_DIR / "cleaned_data.csv"
 
 USER_QUERY = "What patterns in patient visits predict high-cost outcomes?"
