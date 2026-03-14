@@ -13,7 +13,10 @@ export INVESTIGATOR_MODEL=gpt-5.1-2025-11-13   # default
 export CODEGEN_MODEL=gpt-5.1-2025-11-13     # default
 export ANSWER_MODEL=gpt-5.1-2025-11-13      # default
 ```
-4) To run the system:
-Normal run: python scripts/run_graph.py (no change in output)
-Verbose run: AUTODS_VERBOSE=1 python scripts/run_graph.py
-Save to file: AUTODS_VERBOSE=1 python scripts/run_graph.py 2>verbose.log
+4) To run the system, use one of the three commands below:
+```
+python scripts/run_graph.py (no change in output) # default
+AUTODS_VERBOSE=1 python scripts/run_graph.py # verbose output, with truncation
+AUTODS_VERBOSE=full python scripts/run_graph.py # verbose output, no truncation
+```
+Append `2>verbose.log` to the end of the line to output to `verbose.log`
