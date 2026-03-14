@@ -90,7 +90,9 @@ def main() -> None:
         print(f"  Task type           : {findings_data.get('task_type')}")
         print(f"  Data quality score  : {findings_data.get('data_quality_score')}")
         print(f"  Columns to drop     : {findings_data.get('columns_to_drop', [])}")
-        for col, reason in findings_data.get("columns_to_drop_rationale", {}).items():
+        for entry in findings_data.get("columns_to_drop_rationale", []):
+            col = entry["column"] if isinstance(entry, dict) else entry.column
+            reason = entry["reason"] if isinstance(entry, dict) else entry.reason
             print(f"    {col}: {reason}")
 
         violations = findings_data.get("violations", [])

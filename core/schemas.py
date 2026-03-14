@@ -147,9 +147,15 @@ class SemanticViolation(BaseModel):
     )
 
 
+class ColumnDropRationale(BaseModel):
+    """A single column-drop decision with its reason."""
+    column: str = Field(..., description="Column name being dropped.")
+    reason: str = Field(..., description="Why this column is being dropped.")
+
+
 class InvestigationFindings(BaseModel):
     """Complete output of the Investigator Agent."""
-    
+
     target_column: Optional[str] = Field(
         None, description="The column that best answers the user's query (prediction target). "
                           "None if the investigator couldn't determine it."
@@ -160,18 +166,18 @@ class InvestigationFindings(BaseModel):
     task_type: Optional[Literal[
         "binary_classification", "multiclass_classification", "regression"
     ]] = Field(None, description="The ML task type implied by the target column.")
-    
+
     violations: List[SemanticViolation] = Field(
         default_factory=list, description="All semantic violations found in the data."
     )
-    
+
     columns_to_drop: List[str] = Field(
         default_factory=list,
         description="Columns that should be dropped entirely (e.g., PII, IDs, constant columns)."
     )
-    columns_to_drop_rationale: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Mapping of column name -> reason for dropping."
+    columns_to_drop_rationale: List[ColumnDropRationale] = Field(
+        default_factory=list,
+        description="List of columns being dropped and their reasons."
     )
     
     data_quality_score: float = Field(
