@@ -64,6 +64,7 @@ def main() -> None:
         "tool_call_count": 0,
         "pass_count": 0,
         "is_data_clean": False,
+        "target_column": None,
     }
 
     print("=" * 70)

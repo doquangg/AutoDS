@@ -102,7 +102,9 @@ You will receive:
 2. A statistical profile of every column in the dataset
 
 Your task:
-- Identify the TARGET COLUMN that best answers the user's question
+- If a CONFIRMED TARGET COLUMN is provided, use it as a given fact — do NOT \
+re-determine it. If none is provided, identify the target column that best \
+answers the user's question.
 - Find ALL semantic violations in the data
 - Classify each violation by severity and category
 - Provide specific evidence from the profile for each finding
@@ -209,8 +211,18 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
                 pass_history_summary=pass_history_summary,
             )
 
+        # Include confirmed target column if set by human-in-the-loop selection
+        target_section = ""
+        if state.get("target_column"):
+            target_section = (
+                f"CONFIRMED TARGET COLUMN: {state['target_column']}\n"
+                f"(Selected by the user. Use this as a given fact — "
+                f"do NOT re-determine it.)\n\n"
+            )
+
         user_content = (
             f"USER QUERY: {state['user_query']}\n\n"
+            f"{target_section}"
             f"{'RE-EXAMINATION ' if pass_count > 0 else ''}"
             f"DATASET PROFILE ({state['profile']['row_count']} rows):\n"
             f"{profile_json}"

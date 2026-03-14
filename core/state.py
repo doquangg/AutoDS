@@ -78,6 +78,9 @@ class AgentState(TypedDict):
     tool_call_count: int            # Caps investigation tool loops
     final_answer: Optional[str]
 
+    # --- Target Column (human-in-the-loop) ---
+    target_column: Optional[str]    # Human-confirmed target; set once on pass 0, persists across passes
+
     # --- Multi-Pass Control ---
     pass_count: int                 # Current pass number (0-indexed, incremented after sandbox success)
     is_data_clean: bool             # Set by investigator when no further cleaning needed
