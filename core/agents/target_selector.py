@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from core.pipeline.state import AgentState
 from core.agents.agents import get_investigator_llm
 from core.logger import log_node
+from core.prompts import TARGET_RANKING_SYSTEM_PROMPT
 
 
 ################################################################################
@@ -46,14 +47,6 @@ class TargetCandidateList(BaseModel):
 # LLM ranking
 ################################################################################
 
-_RANKING_SYSTEM_PROMPT = """\
-You are a data science assistant. Given a user's question and a list of dataset \
-columns, identify the top 5 columns most likely to be the prediction target \
-(the column the user wants to predict or explain).
-
-Return them ordered by relevance. For each candidate, explain in one sentence \
-why it matches the user's intent.\
-"""
 
 
 def rank_target_candidates(
@@ -80,7 +73,7 @@ def rank_target_candidates(
     )
 
     messages = [
-        SystemMessage(content=_RANKING_SYSTEM_PROMPT),
+        SystemMessage(content=TARGET_RANKING_SYSTEM_PROMPT),
         HumanMessage(content=(
             f"USER QUERY: {user_query}\n\n"
             f"DATASET COLUMNS:\n{columns_text}\n\n"

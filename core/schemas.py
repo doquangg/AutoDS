@@ -23,10 +23,6 @@ from pydantic import BaseModel, Field
 OperationType = Literal[
     "DROP_COLUMN",
     "DROP_ROWS", 
-    "IMPUTE_MEAN",
-    "IMPUTE_MEDIAN",
-    "IMPUTE_MODE",
-    "IMPUTE_CONSTANT",
     "RENAME_COLUMN",
     "CAST_TYPE",
     "OneHotEncode",
@@ -143,7 +139,7 @@ class SemanticViolation(BaseModel):
     )
     suggested_action: str = Field(
         ..., description="Plain-English suggestion for how to fix this. NOT code — just intent. "
-                         "E.g., 'Replace -1 values in age with NaN, then impute with median.'"
+                         "E.g., 'Replace -1 values in age with NaN.'"
     )
 
 
@@ -214,7 +210,7 @@ class CleaningStep(BaseModel):
     
     parameters: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Arguments for the operation (e.g., {'value': 0} for IMPUTE_CONSTANT)."
+        description="Arguments for the operation."
     )
     
     # Links back to the investigation finding that motivated this step
