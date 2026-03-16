@@ -22,10 +22,9 @@ from pydantic import BaseModel, Field
 
 OperationType = Literal[
     "DROP_COLUMN",
-    "DROP_ROWS", 
+    "DROP_ROWS",
     "RENAME_COLUMN",
     "CAST_TYPE",
-    "OneHotEncode",
     "CUSTOM_CODE"
 ]
 
@@ -187,13 +186,33 @@ class InvestigationFindings(BaseModel):
                     "E.g., 'Income column was 40% sentinel values — predictions involving income may be unreliable.'"
     )
 
+
+
+
+################################################################################
+# Schema Definitions for Cleanliness Evaluation:
+# Post-cleaning assessment by the Evaluator agent. This runs AFTER the sandbox
+# executes cleaning code, examining the resulting profile to decide if the data
+# is clean enough for modeling.
+################################################################################
+
+class CleanlinessEvaluation(BaseModel):
+    """Output of the Evaluator agent after sandbox execution."""
     is_data_clean: bool = Field(
-        False,
+        ...,
         description=(
-            "Set to True if the data is clean enough for modeling and no further "
-            "cleaning passes are needed. True when: no CRITICAL violations remain, "
-            "data_quality_score >= 0.85, and remaining issues are cosmetic or minor."
-        )
+            "True if the data is clean enough for modeling and no further "
+            "cleaning passes are needed. True when: no CRITICAL violations "
+            "apparent from the profile, quality looks good, no obvious issues."
+        ),
+    )
+    quality_score: float = Field(
+        ...,
+        description="Overall quality score 0.0 (unusable) to 1.0 (pristine).",
+    )
+    rationale: str = Field(
+        ...,
+        description="Brief explanation of why the data is or isn't clean enough.",
     )
 
 
