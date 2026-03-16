@@ -2,8 +2,10 @@
 # LangGraph state machine for the AutoDS pipeline.
 #
 # FLOW (multi-pass):
-#   START → profiler → investigator ⟲ tools → [clean check] →
-#           code_generator → sandbox → [loop check] → pass_reset → profiler …
+#   START → profiler → target_selector → investigator ⟲ tools →
+#           code_generator → sandbox → [error?] → retry/fail
+#                                     → [success] → evaluator → [clean?] → autogluon
+#                                                              → [not clean] → pass_reset → profiler …
 #         → autogluon → answer_agent → END
 #
 # KEY DESIGN DECISIONS:
@@ -13,36 +15,43 @@
 #   2. Tool loop cap: investigator can call at most MAX_TOOL_CALLS tools.
 #   3. Retry isolation: on sandbox failure, only code_generator re-runs.
 #      Investigation findings are preserved within a pass.
-#   4. Multi-pass loop: after a successful sandbox execution, the cleaned data
-#      is fed back through profiler → investigator for re-examination. The loop
-#      terminates when the investigator declares the data clean or MAX_PASSES
-#      is reached.
+#   4. Multi-pass loop: after a successful sandbox execution, the evaluator
+#      assesses cleanliness. The loop terminates when the evaluator declares
+#      the data clean or MAX_PASSES is reached.
+#   5. Clean-check is done by the evaluator AFTER sandbox execution, not by
+#      the investigator BEFORE code generation. This ensures that identified
+#      issues (like columns_to_drop) are acted on before cleanliness is judged.
 #
 # GRAPH VISUALIZATION:
 #
 #   START
 #     │
 #     ▼
-#   profiler ◄──────────────────┐
-#     │                         │
-#     ▼                         │
-#   investigator ◄──┐           │
-#     │              │          │
-#     ├─[tools?]─► tools        │
-#     │                         │
-#     ├─[clean?]──► autogluon   │  (pass > 0 only: data is clean)
-#     │                │        │
-#     ▼                ▼        │
-#   code_generator  answer_agent│
-#     │                │        │
-#     ▼              END        │
-#   sandbox                     │
-#     │                         │
-#     ├─[error?]─► code_generator (retry, max 3)
-#     │                         │
-#     ├─[max passes?]─► autogluon
-#     │                         │
-#     └─[next pass]─► pass_reset┘
+#   profiler ◄──────────────────────┐
+#     │                             │
+#     ▼                             │
+#   investigator ◄──┐               │
+#     │              │              │
+#     ├─[tools?]─► tools            │
+#     │                             │
+#     ▼                             │
+#   code_generator                  │
+#     │                             │
+#     ▼                             │
+#   sandbox                         │
+#     │                             │
+#     ├─[error?]─► code_generator   │  (retry, max 3)
+#     │                             │
+#     ▼                             │
+#   evaluator                       │
+#     │                             │
+#     ├─[clean?]──► autogluon       │
+#     │                │            │
+#     │              answer_agent   │
+#     │                │            │
+#     │              END            │
+#     │                             │
+#     └─[not clean]─► pass_reset ───┘
 #
 ################################################################################
 
@@ -57,7 +66,7 @@ from langchain_core.messages import AIMessage
 
 # Local Imports
 from core.pipeline.state import AgentState
-from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
+from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent, run_evaluator_agent
 from core.agents.target_selector import select_target_column
 from core.runtime.sandbox import execute_cleaning_plan
 from core.runtime.tools import investigation_tools, set_working_df
@@ -73,7 +82,6 @@ from plugins.modeller import train_model
 MAX_TOOL_CALLS = 30   # Cap on investigation tool calls to prevent runaway loops
 MAX_RETRIES = 3       # Max code generation retries on sandbox failure
 MAX_PASSES = 5        # Max cleaning passes before forcing move to modeling
-CLEAN_SCORE_THRESHOLD = 0.85  # Minimum data_quality_score to consider data clean
 
 
 ################################################################################
@@ -114,9 +122,6 @@ def node_investigator(state: AgentState):
     LLM agent that analyzes the profile and uses tools to diagnose data issues.
     Produces InvestigationFindings — a structured report of what's wrong.
     Does NOT write any Python code.
-
-    On multi-pass re-examination, extracts is_data_clean from findings
-    and writes it to state for the router to check.
     """
     tool_count = state.get("tool_call_count", 0)
     pass_num = state.get("pass_count", 0)
@@ -127,12 +132,9 @@ def node_investigator(state: AgentState):
 
     result = run_investigator_agent(state, max_tool_calls=MAX_TOOL_CALLS)
 
-    # Extract is_data_clean from findings and propagate to state
     findings = result.get("investigation_findings")
-    if findings and hasattr(findings, "is_data_clean"):
-        result["is_data_clean"] = findings.is_data_clean
+    if findings:
         log_node("investigator", "findings extracted",
-                 is_data_clean=findings.is_data_clean,
                  quality_score=getattr(findings, "data_quality_score", None),
                  violation_count=len(getattr(findings, "violations", [])))
 
@@ -204,6 +206,39 @@ def node_sandbox(state: AgentState):
     return updates
 
 
+def node_evaluator(state: AgentState):
+    """
+    LLM agent that assesses whether the post-cleaning data is clean enough
+    for modeling. Runs AFTER the sandbox successfully executes cleaning code.
+
+    Re-profiles the cleaned data first, then makes a single structured LLM
+    call to evaluate cleanliness.
+    """
+    pass_num = state.get("pass_count", 0)
+    print(f"--- [4.5] Evaluator (pass: {pass_num}) ---")
+
+    # Re-profile the cleaned data so the evaluator sees the current state
+    verbose = os.environ.get("AUTODS_VERBOSE", "").strip().lower()
+    is_verbose_enabled = bool(verbose and verbose != "0")
+    if is_verbose_enabled:
+        with redirect_stderr(io.StringIO()):
+            profile = generate_profile(state["working_df"], detailed_profiler=True)
+    else:
+        profile = generate_profile(state["working_df"], detailed_profiler=True)
+
+    log_profile_summary(profile)
+
+    # Run evaluator with the fresh profile
+    eval_state = {**state, "profile": profile}
+    result = run_evaluator_agent(eval_state)
+
+    is_clean = result.get("is_data_clean", False)
+    log_node("evaluator", "assessment complete",
+             is_data_clean=is_clean, pass_count=pass_num)
+
+    return {"is_data_clean": is_clean, "profile": profile}
+
+
 def node_pass_reset(state: AgentState):
     """
     Resets per-pass state fields before starting a new cleaning iteration.
@@ -268,15 +303,14 @@ def node_answer(state: AgentState):
 
 def route_investigator(state: AgentState):
     """
-    After the investigator runs, decide whether to call tools, clean, or skip.
+    After the investigator runs, decide whether to call tools or proceed to cleaning.
 
     1. If the investigator requested tools and we're under the limit → "tools"
-    2. If this is pass > 0 and data is clean → "autogluon" (skip cleaning)
-    3. Otherwise → "code_generator" (proceed with cleaning)
+    2. Otherwise → "code_generator" (proceed with cleaning)
 
-    Clean-check uses a layered approach:
-      - Investigator's is_data_clean boolean (primary signal)
-      - data_quality_score >= threshold with no CRITICAL violations (secondary)
+    Note: Clean-check is now handled by the evaluator AFTER sandbox execution,
+    not here. The investigator always proceeds to code generation once tools
+    are done.
     """
     # --- Tool loop check ---
     for msg in reversed(state.get("investigator_messages", [])):
@@ -296,37 +330,13 @@ def route_investigator(state: AgentState):
                       f"Forcing investigator to finalize.")
             break
 
-    # --- Multi-pass clean check (pass > 0 only) ---
     pass_count = state.get("pass_count", 0)
-    is_clean = state.get("is_data_clean", False)
     findings = state.get("investigation_findings")
-    score = getattr(findings, "data_quality_score", 0) if findings else 0
     violations = getattr(findings, "violations", []) if findings else []
-    critical_count = len([v for v in violations if v.severity == "CRITICAL"])
-
-    if pass_count > 0:
-        # Primary signal: investigator explicitly says clean
-        if is_clean:
-            print(f">>> Investigator declares data clean on pass {pass_count}. "
-                  f"Moving to modeling.")
-            log_routing("route_investigator", "autogluon",
-                        reason="is_data_clean=True", pass_count=pass_count,
-                        quality_score=score, critical_count=critical_count)
-            return "autogluon"
-
-        # Secondary signal: quality score + no CRITICAL violations
-        if findings and score >= CLEAN_SCORE_THRESHOLD and critical_count == 0:
-            print(f">>> Quality score {score:.2f} >= {CLEAN_SCORE_THRESHOLD} "
-                  f"with no CRITICAL violations. Moving to modeling.")
-            log_routing("route_investigator", "autogluon",
-                        reason="score_threshold", pass_count=pass_count,
-                        quality_score=score, critical_count=critical_count)
-            return "autogluon"
 
     log_routing("route_investigator", "code_generator",
-                pass_count=pass_count, is_data_clean=is_clean,
-                quality_score=score, violation_count=len(violations),
-                critical_count=critical_count)
+                pass_count=pass_count,
+                violation_count=len(violations))
     return "code_generator"
 
 
@@ -336,8 +346,7 @@ def route_sandbox(state: AgentState):
 
     - Error + retries left → "retry" (back to code_generator)
     - Error + retries exhausted → "failed" (END)
-    - Success + max passes reached → "done" (autogluon)
-    - Success + under max passes → "next_pass" (pass_reset → profiler loop)
+    - Success → "evaluate" (evaluator assesses cleanliness)
     """
     latest_error = state.get("latest_error")
     retry_count = state.get("retry_count", 0)
@@ -355,14 +364,36 @@ def route_sandbox(state: AgentState):
                     error=latest_error[:200])
         return "retry"
 
-    # Success path: check if we should loop
-    if pass_count >= MAX_PASSES:
-        print(f">>> Max passes ({MAX_PASSES}) reached. Moving to modeling.")
-        log_routing("route_sandbox", "done",
-                    pass_count=pass_count, max_passes=MAX_PASSES)
+    log_routing("route_sandbox", "evaluate", pass_count=pass_count)
+    return "evaluate"
+
+
+def route_evaluator(state: AgentState):
+    """
+    After the evaluator runs, decide next step.
+
+    - is_data_clean=True → "done" (autogluon)
+    - pass_count >= MAX_PASSES → "done" (autogluon, forced)
+    - Otherwise → "next_pass" (pass_reset → profiler loop)
+    """
+    is_clean = state.get("is_data_clean", False)
+    pass_count = state.get("pass_count", 0)
+
+    if is_clean:
+        print(f">>> Evaluator declares data clean on pass {pass_count}. "
+              f"Moving to modeling.")
+        log_routing("route_evaluator", "done",
+                    reason="is_data_clean=True", pass_count=pass_count)
         return "done"
 
-    log_routing("route_sandbox", "next_pass",
+    if pass_count >= MAX_PASSES:
+        print(f">>> Max passes ({MAX_PASSES}) reached. Moving to modeling.")
+        log_routing("route_evaluator", "done",
+                    reason="max_passes", pass_count=pass_count,
+                    max_passes=MAX_PASSES)
+        return "done"
+
+    log_routing("route_evaluator", "next_pass",
                 pass_count=pass_count, max_passes=MAX_PASSES)
     return "next_pass"
 
@@ -380,6 +411,7 @@ workflow.add_node("investigator",      node_investigator)
 workflow.add_node("tools",          ToolNode(investigation_tools, messages_key="investigator_messages"))
 workflow.add_node("code_generator", node_code_generator)
 workflow.add_node("sandbox",        node_sandbox)
+workflow.add_node("evaluator",      node_evaluator)
 workflow.add_node("pass_reset",     node_pass_reset)
 workflow.add_node("autogluon",      node_autogluon)
 workflow.add_node("answer_agent",   node_answer)
@@ -390,14 +422,13 @@ workflow.add_edge(START, "profiler")
 workflow.add_edge("profiler", "target_selector")
 workflow.add_edge("target_selector", "investigator")
 
-# Investigator: tool loop, clean check, or proceed to code_generator
+# Investigator: tool loop or proceed to code_generator
 workflow.add_conditional_edges(
     "investigator",
     route_investigator,
     {
         "tools": "tools",
         "code_generator": "code_generator",
-        "autogluon": "autogluon",       # Multi-pass: data is clean, skip cleaning
     }
 )
 workflow.add_edge("tools", "investigator")  # Tool results go back to investigator
@@ -405,15 +436,24 @@ workflow.add_edge("tools", "investigator")  # Tool results go back to investigat
 # Code generator → sandbox (always)
 workflow.add_edge("code_generator", "sandbox")
 
-# Sandbox: retry, loop back for another pass, or proceed to modeling
+# Sandbox: retry on error, or evaluate cleanliness on success
 workflow.add_conditional_edges(
     "sandbox",
     route_sandbox,
     {
         "retry": "code_generator",      # Only re-generate code, not re-investigate
-        "next_pass": "pass_reset",      # Multi-pass: loop back for re-examination
-        "done": "autogluon",            # Multi-pass: max passes reached
+        "evaluate": "evaluator",        # Success: evaluate cleanliness
         "failed": END,
+    }
+)
+
+# Evaluator: clean → modeling, not clean → another pass
+workflow.add_conditional_edges(
+    "evaluator",
+    route_evaluator,
+    {
+        "done": "autogluon",            # Data is clean or max passes reached
+        "next_pass": "pass_reset",      # Another cleaning pass needed
     }
 )
 

@@ -11,9 +11,4 @@ Your job on this pass:
 4. Look for issues that were MISSED in previous passes
 5. Do NOT re-flag issues that have already been successfully addressed
 
-CRITICAL: You MUST set is_data_clean to True if:
-- No CRITICAL violations remain
-- Remaining issues are cosmetic or would not meaningfully affect model quality
-- The data_quality_score is >= 0.85
-
-Set is_data_clean to False if there are substantive issues that warrant another cleaning pass.
+Focus on identifying any remaining substantive issues that warrant another cleaning pass.

@@ -183,6 +183,11 @@ def value_distribution(column: str, bins: int = 20) -> str:
 
     # Numeric: histogram
     if pd.api.types.is_numeric_dtype(series):
+        series = series[np.isfinite(series)]
+        if series.empty:
+            result = f"Column '{column}' has no finite values (all inf/NaN)."
+            log_tool_call("value_distribution", params, result)
+            return result
         counts, edges = np.histogram(series, bins=bins)
         lines = [f"Distribution of '{column}' ({len(series)} non-null values):"]
         for i, count in enumerate(counts):

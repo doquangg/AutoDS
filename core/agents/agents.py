@@ -36,7 +36,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 from core.pipeline.state import AgentState
-from core.schemas import InvestigationFindings, CleaningRecipe
+from core.schemas import InvestigationFindings, CleaningRecipe, CleanlinessEvaluation
 from core.runtime.tools import investigation_tools
 from core.logger import (
     log_llm_request, log_llm_response, log_investigation_findings,
@@ -47,6 +47,7 @@ from core.prompts import (
     INVESTIGATOR_REEXAM_PROMPT,
     CODEGEN_SYSTEM_PROMPT,
     ANSWER_SYSTEM_PROMPT,
+    EVALUATOR_SYSTEM_PROMPT,
 )
 
 
@@ -63,9 +64,8 @@ def _get_llm(model: str) -> ChatOpenAI:
         _llm_cache[model] = ChatOpenAI(
             model=model,
             temperature=0.0,  # Deterministic for reproducibility
-            base_url=os.environ.get("OPENAI_API_BASE"),  # None = use OpenAI
+            base_url=os.environ.get("OPENAI_API_BASE"),
             api_key=os.environ.get("OPENAI_API_KEY"),
-            reasoning_effort="medium",
         )
     return _llm_cache[model]
 
@@ -83,6 +83,11 @@ def get_codegen_llm() -> ChatOpenAI:
 def get_answer_llm() -> ChatOpenAI:
     """Returns the LLM for the answer agent (default: gpt-5.1-2025-11-13)."""
     return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-5.1-2025-11-13"))
+
+
+def get_evaluator_llm() -> ChatOpenAI:
+    """Returns the LLM for the evaluator agent (default: gpt-4.1-2025-04-14)."""
+    return _get_llm(os.environ.get("EVALUATOR_MODEL", "gpt-4.1-2025-04-14"))
 
 
 ################################################################################
@@ -330,7 +335,7 @@ def run_answer_agent(state: AgentState) -> str:
     # Serialize model metadata
     model_meta = state.get("model_metadata", {})
     model_json = json.dumps(model_meta, indent=2, default=str)
-    
+
     # Serialize investigation findings for caveats
     findings = state.get("investigation_findings")
     caveats_section = ""
@@ -341,7 +346,7 @@ def run_answer_agent(state: AgentState) -> str:
         caveats = findings_data.get("key_caveats", [])
         quality = findings_data.get("data_quality_score", "unknown")
         violations = findings_data.get("violations", [])
-        
+
         caveats_section = (
             f"\nDATA QUALITY SCORE: {quality}\n"
             f"VIOLATIONS FOUND: {len(violations)}\n"
@@ -356,6 +361,70 @@ def run_answer_agent(state: AgentState) -> str:
             f"{caveats_section}"
         )),
     ]
-    
+
     response = llm.invoke(messages)
     return response.content
+
+
+################################################################################
+# Agent 4: Evaluator
+#
+# INPUT:  post-cleaning profile + pass history
+# OUTPUT: CleanlinessEvaluation (is_data_clean, quality_score, rationale)
+#
+# This agent runs AFTER the sandbox executes cleaning code. It examines the
+# post-cleaning profile to decide whether data is clean enough for modeling.
+# This replaces the previous approach where the investigator set is_data_clean
+# before any cleaning code ran.
+################################################################################
+
+
+def run_evaluator_agent(state: AgentState) -> Dict[str, Any]:
+    """
+    Runs the evaluator agent on post-cleaning data.
+    Returns state updates including is_data_clean.
+    """
+    llm = get_evaluator_llm()
+    structured_llm = llm.with_structured_output(
+        CleanlinessEvaluation, method="function_calling"
+    )
+
+    profile_json = json.dumps(state["profile"], indent=2, default=str)
+
+    pass_history = state.get("pass_history", [])
+    history_lines = []
+    for ph in pass_history:
+        history_lines.append(
+            f"  Pass {ph['pass_number']}: {ph['violations_found']} violations found, "
+            f"quality={ph['quality_score']}, {ph['steps_executed']} steps executed, "
+            f"{ph['rows_after']} rows remaining"
+        )
+    pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
+
+    messages = [
+        SystemMessage(content=EVALUATOR_SYSTEM_PROMPT),
+        HumanMessage(content=(
+            f"POST-CLEANING DATASET PROFILE ({state['profile']['row_count']} rows):\n"
+            f"{profile_json}\n\n"
+            f"PASS HISTORY:\n{pass_history_summary}\n\n"
+            f"Evaluate whether this data is clean enough for modeling."
+        )),
+    ]
+
+    log_llm_request(
+        "evaluator", pass_count=state.get("pass_count", 0),
+        message_count=len(messages),
+        system_prompt_snippet=EVALUATOR_SYSTEM_PROMPT[:200],
+        user_message_snippet=messages[1].content[:300],
+    )
+
+    evaluation = structured_llm.invoke(messages)
+
+    log_llm_response(
+        "evaluator",
+        content=f"is_data_clean={evaluation.is_data_clean}, "
+                f"quality_score={evaluation.quality_score}, "
+                f"rationale={evaluation.rationale}",
+    )
+
+    return {"is_data_clean": evaluation.is_data_clean}
