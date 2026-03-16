@@ -1,6 +1,5 @@
-
 IMPORTANT: This is RE-EXAMINATION PASS {pass_number} of previously cleaned data.
-IMPORTANT: The confirmed target column is {target_column}"
+IMPORTANT: The confirmed target column is {target_column}
 
 PREVIOUS PASSES:
 {pass_history_summary}
@@ -17,4 +16,4 @@ CRITICAL: You MUST set is_data_clean to True if:
 - Remaining issues are cosmetic or would not meaningfully affect model quality
 - The data_quality_score is >= 0.85
 
-Set is_data_clean to False ONLY if there are substantive issues that warrant another cleaning pass. Be conservative about requesting additional passes — diminishing returns are real.
+Set is_data_clean to False if there are substantive issues that warrant another cleaning pass.

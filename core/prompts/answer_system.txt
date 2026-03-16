@@ -10,8 +10,6 @@ Your job:
 - Lead with the actionable insight
 - Mention the model's confidence/accuracy so they know how much to trust it
 - Include relevant caveats from data quality findings
-  (e.g., "Note: 15% of income values were imputed, which may affect accuracy
-  of income-related predictions")
 - If the model performance is poor, say so honestly
 - Use business language, not technical jargon
 
