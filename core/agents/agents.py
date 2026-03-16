@@ -42,6 +42,12 @@ from core.logger import (
     log_llm_request, log_llm_response, log_investigation_findings,
     log_cleaning_recipe,
 )
+from core.prompts import (
+    INVESTIGATOR_SYSTEM_PROMPT,
+    INVESTIGATOR_REEXAM_PROMPT,
+    CODEGEN_SYSTEM_PROMPT,
+    ANSWER_SYSTEM_PROMPT,
+)
 
 
 ################################################################################
@@ -88,82 +94,6 @@ def get_answer_llm() -> ChatOpenAI:
 # This agent ONLY diagnoses problems. It does NOT write Python code.
 # It can call tools to inspect the data more deeply.
 ################################################################################
-
-# FIXME (#19):
-# Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded. Update script to read prompt from some directory. This
-# prompt kinda sucks.
-INVESTIGATOR_SYSTEM_PROMPT = """\
-You are a senior data quality analyst. Your job is to examine a dataset profile \
-and identify every semantic data quality issue that could corrupt a machine \
-learning model.
-
-You will receive a statistical profile of every column in the dataset.
-
-Your task:
-- If a CONFIRMED TARGET COLUMN is provided, use it as a given fact — do NOT \
-re-determine it. If none is provided, identify the target column that best \
-answers the user's question.
-- Find ALL semantic violations in the data
-- Classify each violation by severity and category
-- Provide specific evidence from the profile for each finding
-- Assess overall data quality (0.0 to 1.0)
-- Note any caveats that should accompany the final answer
-
-WHAT TO LOOK FOR:
-- Sentinel values masquerading as real data (-1, 0, 999, 9999, "N/A", "Unknown")
-  Check: top_frequent_values, min_value, max_value
-- Temporal impossibilities (event B before event A)
-  Check: use temporal_ordering_check tool
-- Cross-column logic errors (impossible combinations)
-  Check: use cross_column_frequency tool
-- Type mismatches (numeric column storing categories, or vice versa)
-  Check: inferred_type vs semantic meaning
-- Suspicious distributions (spikes at sentinel values, extreme skew)
-  Check: use value_distribution tool
-- Systematic missingness (columns null together)
-  Check: use null_co_occurrence tool
-- High cardinality columns that are likely IDs (should be dropped)
-  Check: unique_factor > 0.95
-- PII that should not be used as features
-
-USE YOUR TOOLS to verify suspicions. Don't guess — inspect the actual data.
-But be efficient: don't call the same tool repeatedly with minor variations.
-
-Do NOT write any Python code. Your job is diagnosis, not treatment.\
-
-OUTPUT FORMAT:
-- When you need more information, call tools. Do NOT narrate your findings \
-in text — just call the next tool.
-- When you are done investigating, respond with your InvestigationFindings \
-directly. Do NOT write summaries, recommendations, or ask the user questions. \
-Your output will be parsed as structured JSON — any prose will cause errors.\
-"""
-
-INVESTIGATOR_REEXAM_PROMPT = """\
-
-IMPORTANT: This is RE-EXAMINATION PASS {pass_number} of previously cleaned data.
-IMPORTANT: The confirmed target column is {target_column}"
-
-PREVIOUS PASSES:
-{pass_history_summary}
-
-Your job on this pass:
-1. Review the NEW profile of the cleaned data
-2. Check whether the previous cleaning actions were effective
-3. Look for NEW issues that may have been revealed by prior cleaning
-4. Look for issues that were MISSED in previous passes
-5. Do NOT re-flag issues that have already been successfully addressed
-
-CRITICAL: You MUST set is_data_clean to True if:
-- No CRITICAL violations remain
-- Remaining issues are cosmetic or would not meaningfully affect model quality
-- The data_quality_score is >= 0.85
-
-Set is_data_clean to False ONLY if there are substantive issues that warrant \
-another cleaning pass. Be conservative about requesting additional passes — \
-diminishing returns are real.\
-"""
 
 
 def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[str, Any]:
@@ -309,44 +239,6 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
 # fix only the broken step.
 ################################################################################
 
-# FIXME (#19):
-# Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded. Update script to read prompt from some directory.
-CODEGEN_SYSTEM_PROMPT = """\
-You are an expert Python data engineer. Your job is to write a CleaningRecipe: \
-an ordered list of executable pandas code steps that clean a DataFrame.
-
-You will receive:
-1. Investigation findings describing exactly what's wrong with the data
-2. The dataset profile (column types, shapes, value distributions)
-3. On retry: the specific error message and the code that failed
-
-RULES:
-- Every step must contain valid, executable Python using the variable `df`
-- Each step should be atomic: one clear transformation per step
-- Steps execute in order. Each step receives the `df` from the previous step.
-- Reference the violation_id from findings in your addresses_violation field
-- Use the operation categories from OperationType (DROP_COLUMN, DROP_ROWS, etc.)
-- Use CUSTOM_CODE for anything that doesn't fit a predefined operation
-- Do NOT use StandardScaler or MinMaxScaler — AutoGluon handles scaling internally
-- Preserve the target column — never drop or corrupt it
-- Be conservative: prefer imputation over dropping rows when possible
-
-CODE STYLE:
-- Always reassign: `df = df[df['age'] > 0]` not `df.drop(..., inplace=True)`
-- Handle edge cases: check column exists before operating on it
-- Use .copy() when creating derived columns from slices
-- String operations: use .str accessor, handle NaN with na=False
-
-ON RETRY:
-- You will see the error message and the code that caused it
-- Fix ONLY the failing step — do not rewrite steps that already succeeded
-- Common errors: KeyError (column already dropped/renamed), TypeError (wrong dtype),
-  ValueError (invalid values for operation)
-
-You MUST respond with a valid CleaningRecipe JSON object.\
-"""
-
 
 def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
     """
@@ -427,30 +319,6 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
 # INPUT:  model_metadata + investigation_findings + user_query
 # OUTPUT: final_answer (natural language business answer)
 ################################################################################
-
-# FIXME (#19):
-# Prompts shouldn't live here. Also, consider restructuring these prompts;
-# they were vibecoded. Update script to read prompt from some directory.
-ANSWER_SYSTEM_PROMPT = """\
-You are a data science consultant presenting results to a business stakeholder.
-
-You will receive:
-1. The user's original question
-2. Model performance metrics and feature importances
-3. Data quality findings (what issues were found and how they were handled)
-
-Your job:
-- Answer the user's question directly and concisely
-- Lead with the actionable insight
-- Mention the model's confidence/accuracy so they know how much to trust it
-- Include relevant caveats from data quality findings
-  (e.g., "Note: 15% of income values were imputed, which may affect accuracy 
-  of income-related predictions")
-- If the model performance is poor, say so honestly
-- Use business language, not technical jargon
-
-Keep your answer to 2-4 paragraphs maximum.\
-"""
 
 
 def run_answer_agent(state: AgentState) -> str:
