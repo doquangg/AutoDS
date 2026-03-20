@@ -1,6 +1,16 @@
 # AutoDS
 A library for taking unclean data from raw to insights, via conversation.
 
+# Intended Usage
+AutoDS is designed for questions that require **supervised machine learning** — any question where you want to understand, explain, or predict a target variable. It automates the full pipeline from raw, messy data to business-friendly insights: data profiling → quality investigation → cleaning → model training (via AutoGluon) → answer generation.
+
+**Supported task types:**
+- **Regression**: "What drives high hospital bills?" / "Can we forecast monthly revenue?"
+- **Binary classification**: "What predicts patient readmission?" / "Which customers will churn?"
+- **Multiclass classification**: "What determines a patient's risk category?"
+
+**Out of scope:** Simple descriptive or aggregation queries that don't require ML modeling — e.g., "What's the average bill?", "How many patients visited last month?", "Show me all visits in January." These are better served by SQL or BI tools.
+
 # Instructions
 1) Create a conda environment via: `conda env create -f env.yml` from the root directory.
 2) Set your OpenAI API key:
