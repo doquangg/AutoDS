@@ -187,6 +187,33 @@ def log_node(node_name: str, message: str, **fields) -> None:
         logger.debug("NODE %s | %s", node_name, message)
 
 
+def log_model_metadata(metadata: dict) -> None:
+    """Log the model training results."""
+    if metadata.get("error"):
+        logger.warning("MODEL_TRAINING_FAILED error=%s", metadata["error"])
+        return
+
+    lines = [
+        "MODEL_METADATA",
+        f"  target_column: {metadata.get('target_column')}",
+        f"  problem_type: {metadata.get('problem_type')}",
+        f"  best_model: {metadata.get('best_model')}",
+        f"  training_time: {metadata.get('training_time_seconds')}s",
+        f"  num_rows: {metadata.get('num_rows_trained')}",
+        f"  num_features: {metadata.get('num_features')}",
+    ]
+
+    eval_metrics = metadata.get("eval_metrics", {})
+    lines.append(f"  eval_metrics: {_safe_json(eval_metrics)}")
+
+    feat_imp = metadata.get("feature_importance", {})
+    if feat_imp:
+        top5 = sorted(feat_imp.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
+        lines.append(f"  top_features: {top5}")
+
+    logger.debug("\n".join(lines))
+
+
 def log_profile_summary(profile: dict) -> None:
     """Log a compact summary of the profiler output."""
     columns = profile.get("columns", [])
