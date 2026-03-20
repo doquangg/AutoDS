@@ -59,6 +59,7 @@
 import io
 import os
 from contextlib import redirect_stderr
+from pathlib import Path
 
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
@@ -79,6 +80,7 @@ from plugins.modeller import train_model
 # Configuration
 ################################################################################
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 MAX_TOOL_CALLS = 30   # Cap on investigation tool calls to prevent runaway loops
 MAX_RETRIES = 3       # Max code generation retries on sandbox failure
 MAX_PASSES = 5        # Max cleaning passes before forcing move to modeling
@@ -261,11 +263,10 @@ def node_pass_reset(state: AgentState):
         "current_plan": None,
     }
 
-# FIXME (#3): Need to actually implement AutoGluon
 def node_autogluon(state: AgentState):
     """Trains an ML model using AutoGluon on the cleaned data."""
     print("--- [5] AutoGluon Modeling ---")
-    
+
     # Prefer human-confirmed target column; fall back to investigator's choice
     target_col = state.get("target_column")
     if not target_col:
@@ -275,12 +276,28 @@ def node_autogluon(state: AgentState):
                 findings.model_dump() if hasattr(findings, "model_dump") else findings
             )
             target_col = target_data.get("target_column")
-    
+
+    # Extract task_type hint from investigation findings
+    findings = state.get("investigation_findings")
+    task_type = None
+    if findings:
+        task_type = (
+            findings.task_type if hasattr(findings, "task_type")
+            else findings.get("task_type")
+        )
+
     metadata = train_model(
-        state["clean_df"], 
+        state["clean_df"],
         state["user_query"],
-        target_column=target_col  # Pass explicit target instead of guessing
+        target_column=target_col,
+        task_type=task_type,
+        output_dir=str(REPO_ROOT / "output"),
     )
+
+    log_node("autogluon", "modeling complete",
+             error=metadata.get("error"),
+             best_model=metadata.get("best_model"))
+
     return {"model_metadata": metadata}
 
 
@@ -288,13 +305,10 @@ def node_answer(state: AgentState):
     """
     LLM agent that generates a business-friendly answer using model results
     and data quality caveats from the investigation.
-
-    TODO: Currently stubbed — returns placeholder until AutoGluon is implemented.
-    Uncomment the real implementation when model_metadata contains real results.
     """
-    print("--- [6] Final Answer [STUB] ---")
-    # ans = run_answer_agent(state)
-    return {"final_answer": "Answer agent stubbed — AutoGluon not yet implemented."}
+    print("--- [6] Final Answer ---")
+    answer = run_answer_agent(state)
+    return {"final_answer": answer}
 
 
 ################################################################################

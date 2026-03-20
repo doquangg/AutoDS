@@ -40,6 +40,14 @@ OUTPUT_DIR = REPO_ROOT / "output"
 OUTPUT_CSV = OUTPUT_DIR / "cleaned_data.csv"
 OUTPUT_VERBOSE_LOG = OUTPUT_DIR / "verbose.log"
 
+# AutoDS is designed for supervised ML questions — regression, binary/multiclass
+# classification — where the user wants to understand, explain, or predict a
+# target variable. Examples:
+#   "What drives high hospital bills?"              (regression)
+#   "Which patients will be readmitted?"             (binary classification)
+#   "What determines a patient's risk category?"     (multiclass classification)
+# Descriptive/aggregation queries (e.g., "What's the average bill?") are out of
+# scope and better served by SQL or BI tools.
 USER_QUERY = "What patterns in patient visits predict high-cost outcomes?"
 
 
@@ -153,6 +161,36 @@ def main() -> None:
         print(f"  Saved to            : {OUTPUT_CSV}")
     else:
         print("\n  Clean DataFrame     : None (pipeline may have failed)")
+
+    # Model results
+    model_meta = result.get("model_metadata", {})
+    if model_meta and not model_meta.get("error"):
+        print(f"\n  --- Model Results ---")
+        print(f"  Problem type        : {model_meta.get('problem_type')}")
+        print(f"  Best model          : {model_meta.get('best_model')}")
+        print(f"  Training time       : {model_meta.get('training_time_seconds')}s")
+        print(f"  Model saved to      : {model_meta.get('model_path')}")
+
+        eval_metrics = model_meta.get("eval_metrics", {})
+        if eval_metrics:
+            print(f"  Evaluation metrics  :")
+            for metric, value in eval_metrics.items():
+                print(f"    {metric}: {value}")
+
+        feat_imp = model_meta.get("feature_importance", {})
+        if feat_imp:
+            sorted_feats = sorted(feat_imp.items(), key=lambda x: abs(x[1]), reverse=True)
+            print(f"  Top features        :")
+            for name, imp in sorted_feats[:10]:
+                print(f"    {name}: {imp:.4f}")
+
+        leaderboard = model_meta.get("leaderboard", [])
+        if leaderboard:
+            print(f"  Leaderboard (top {len(leaderboard)}):")
+            for entry in leaderboard:
+                print(f"    {entry.get('model', '?')}: score={entry.get('score_val', '?')}")
+    elif model_meta and model_meta.get("error"):
+        print(f"\n  Model training FAILED: {model_meta['error']}")
 
     # Final answer
     print(f"\n  Final answer        : {result.get('final_answer', 'N/A')}")

@@ -12,7 +12,7 @@ Assess whether the data is ready for modeling. Return a structured evaluation wi
 3. rationale: Brief explanation of your assessment.
 
 CRITERIA FOR CLEAN DATA (is_data_clean = True):
-- The target column has no inf, -inf, sentinel, or impossible values (this is the most important check — problems in the target are always CRITICAL)
+- The target column has no NaN, inf, -inf, sentinel, or impossible values (this is the most important check — problems in the target are always CRITICAL). Check the target column's completeness field: if completeness < 1.0, the target has missing values and the data is NOT clean.
 - No obvious CRITICAL issues visible in the profile (sentinel values, impossible ranges, severe type mismatches)
 - No inf or -inf values in any numeric column
 - Completeness is reasonable (no columns with extreme missingness that should have been addressed)
@@ -20,7 +20,7 @@ CRITERIA FOR CLEAN DATA (is_data_clean = True):
 - No clear signs of corruption or systematic data quality problems
 
 CRITERIA FOR ANOTHER PASS (is_data_clean = False):
-- The target column contains inf, -inf, sentinel values, or impossible values
+- The target column contains NaN (completeness < 1.0), inf, -inf, sentinel values, or impossible values
 - Any numeric column contains inf or -inf values
 - Columns that should have been dropped are still present (check for ID columns: any column with unique_factor > 0.9 that isn't the target is almost certainly an ID/key and must be dropped before modeling)
 - Constant columns (only one unique value) are still present
