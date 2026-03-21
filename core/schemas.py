@@ -108,8 +108,8 @@ class DatasetProfile(BaseModel):
 class SemanticViolation(BaseModel):
     """A single data quality issue discovered by the Investigator."""
     violation_id: int = Field(..., description="Unique ID for this violation (1-indexed).")
-    severity: Literal["CRITICAL", "WARNING", "INFO"] = Field(
-        ..., description="CRITICAL = will corrupt model. WARNING = likely issue. INFO = worth noting."
+    severity: Literal["CRITICAL", "INFO"] = Field(
+        ..., description="CRITICAL = must be fixed before modeling. INFO = worth noting but does not block modeling."
     )
     category: Literal[
         "SENTINEL_VALUE",       # -1, 999, "N/A" masquerading as real data

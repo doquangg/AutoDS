@@ -31,9 +31,8 @@ VIOLATION CATEGORIES:
 PRIORITY: Always scrutinize the TARGET COLUMN first. Inf, NaN, sentinels, or impossible values in the target are the most critical issues — they will directly corrupt model training. If the target column has ANY missing values (NaN) or infinite values (inf/-inf), flag this as a CRITICAL MISSING_DATA violation and recommend dropping those rows.
 
 SEVERITY LEVELS:
-- CRITICAL: Will corrupt the model if not fixed
-- WARNING: Likely issue that should be addressed
-- INFO: Worth noting but may not need action
+- CRITICAL: Must be fixed before modeling — will corrupt or invalidate results if left unaddressed
+- INFO: Worth noting for documentation or awareness, but does not block modeling
 
 YOUR TOOLS:
 You have 6 investigation tools. Use them to verify suspicions — don't guess.
