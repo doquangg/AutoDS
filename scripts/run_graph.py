@@ -73,7 +73,6 @@ def main() -> None:
         "retry_count": 0,
         "tool_call_count": 0,
         "pass_count": 0,
-        "is_data_clean": False,
         "target_column": None,
     }
 
@@ -98,7 +97,6 @@ def main() -> None:
         print(f"\n  Target column       : {findings_data.get('target_column')}")
         print(f"  Target rationale    : {findings_data.get('target_column_rationale')}")
         print(f"  Task type           : {findings_data.get('task_type')}")
-        print(f"  Data quality score  : {findings_data.get('data_quality_score')}")
         print(f"  Columns to drop     : {findings_data.get('columns_to_drop', [])}")
         for entry in findings_data.get("columns_to_drop_rationale", []):
             col = entry["column"] if isinstance(entry, dict) else entry.column
@@ -144,12 +142,16 @@ def main() -> None:
     pass_history = result.get("pass_history", [])
     if pass_history:
         for ph in pass_history:
-            print(f"    Pass {ph['pass_number']}: quality={ph['quality_score']}, "
+            algo = ph.get('quality_score')
+            score_str = f"quality={algo:.2f}" if algo is not None else "quality=N/A"
+            print(f"    Pass {ph['pass_number']}: {score_str}, "
                   f"violations={ph['violations_found']}, "
                   f"steps={ph['steps_executed']}, "
                   f"rows_after={ph['rows_after']}")
-    is_clean = result.get("is_data_clean", False)
-    print(f"  Data declared clean : {is_clean}")
+    profile = result.get("profile") or {}
+    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
+    score_str = f"{algo_score:.2f}" if algo_score is not None else "N/A"
+    print(f"  Final quality score : {score_str}")
 
     # Clean DataFrame
     clean_df = result.get("clean_df")

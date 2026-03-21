@@ -17,7 +17,7 @@ import pandas as pd
 import json
 import time
 
-from core.schemas import DatasetProfile, ColumnProfile
+from core.schemas import DatasetProfile, ColumnProfile, AlgorithmicQualityScore
 
 # ydata metric cap (keep profile compact for LLM/tokens)
 DEFAULT_MAX_METRICS_PER_COL = 20
@@ -138,6 +138,22 @@ def _semantic_warnings(series: pd.Series, inferred_type: str, unique_factor: flo
 
         if (s_num < 0).any():
             issues.append("Contains Negative Values")
+
+    # Heaping detection: single value dominates a column that should have variety
+    if inferred_type == "Numeric" and len(s_nonnull) > 0:
+        s_num = pd.to_numeric(s_nonnull, errors="coerce").dropna()
+        if len(s_num) > 0:
+            vc = s_num.value_counts()
+            top_value = vc.index[0]
+            top_count = int(vc.iloc[0])
+            top_ratio = top_count / len(s_num)
+            # Flag if top value accounts for >40% of non-null values
+            # AND column has some variety (not a true binary/categorical)
+            if top_ratio > 0.40 and unique_factor > 0.05:
+                issues.append(
+                    f"Value Heaping: {top_value} appears {top_count} times "
+                    f"({top_ratio:.0%} of non-null values)"
+                )
 
     # String cleanliness
     if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
@@ -279,7 +295,137 @@ def _ydata_profile_whitelist(df: pd.DataFrame, max_metrics_per_col: int = 20) ->
         return {}, str(e)
 
 
-def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[str, Any]:
+def compute_quality_score(
+    profile: Dict[str, Any],
+    target_column: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Compute a deterministic quality score from profile statistics.
+
+    Returns a dict compatible with AlgorithmicQualityScore:
+        overall, completeness, target_integrity, value_plausibility,
+        structural_integrity, flags.
+
+    Weights (with target column):
+        completeness       0.00  (informational only — AutoGluon handles missing features)
+        target_integrity   0.45
+        value_plausibility 0.30
+        structural_integrity 0.25
+
+    Weights (no target column):
+        completeness       0.00
+        value_plausibility 0.55
+        structural_integrity 0.45
+    """
+    columns = profile.get("columns", [])
+    if not columns:
+        return AlgorithmicQualityScore(
+            overall=0.0, completeness=0.0, target_integrity=None,
+            value_plausibility=0.0, structural_integrity=0.0,
+            flags=["no_columns_in_profile"],
+        ).model_dump()
+
+    row_count = profile.get("row_count", 0)
+    flags: List[str] = []
+
+    # --- Completeness sub-score ---
+    completeness_values = [c.get("completeness", 0.0) for c in columns]
+    completeness_score = sum(completeness_values) / len(completeness_values)
+
+    # --- Target integrity sub-score ---
+    target_integrity = None
+    if target_column:
+        target_col = next(
+            (c for c in columns if c.get("name") == target_column), None
+        )
+        if target_col:
+            ti = target_col.get("completeness", 0.0)
+            # Penalize inf/nan in target
+            inf_nan = target_col.get("inf_nan_count") or 0
+            if inf_nan > 0 and row_count > 0:
+                penalty = min(inf_nan / row_count, 1.0)
+                ti = ti * (1.0 - penalty)
+                flags.append(
+                    f"target_inf_nan: {target_column} has {inf_nan} inf/nan values"
+                )
+            # Check for heaping in target
+            warnings_list = target_col.get("semantic_warnings", [])
+            for w in warnings_list:
+                if "Value Heaping" in w:
+                    ti *= 0.7
+                    flags.append(f"target_heaping: {target_column} — {w}")
+                    break
+            target_integrity = ti
+        else:
+            flags.append(f"target_column_not_found: {target_column}")
+
+    # --- Value plausibility sub-score ---
+    # Penalizes heaping/template patterns in numeric columns
+    numeric_cols = [c for c in columns if c.get("inferred_type") == "Numeric"]
+    if numeric_cols:
+        plausibility_scores = []
+        for col in numeric_cols:
+            col_score = 1.0
+            warnings_list = col.get("semantic_warnings", [])
+            for w in warnings_list:
+                if "Value Heaping" in w:
+                    # Extract ratio if possible, else use default penalty
+                    col_score *= 0.4
+                    col_name = col.get("name", "unknown")
+                    flags.append(f"heaping: {col_name} — {w}")
+                    break
+                if "Possible Sentinel" in w:
+                    col_score *= 0.7
+            plausibility_scores.append(col_score)
+        value_plausibility = sum(plausibility_scores) / len(plausibility_scores)
+    else:
+        value_plausibility = 1.0
+
+    # --- Structural integrity sub-score ---
+    # Fraction of numeric columns with no inf/nan
+    if numeric_cols:
+        clean_cols = sum(
+            1 for c in numeric_cols
+            if (c.get("inf_nan_count") or 0) == 0
+        )
+        structural_integrity = clean_cols / len(numeric_cols)
+        bad_cols = [
+            c.get("name") for c in numeric_cols
+            if (c.get("inf_nan_count") or 0) > 0
+        ]
+        if bad_cols:
+            flags.append(f"inf_nan_present: {', '.join(bad_cols)}")
+    else:
+        structural_integrity = 1.0
+
+    # --- Weighted composite ---
+    # Completeness is informational only (weight 0) because AutoGluon
+    # handles missing feature data natively.
+    if target_integrity is not None:
+        overall = (
+            0.45 * target_integrity
+            + 0.30 * value_plausibility
+            + 0.25 * structural_integrity
+        )
+    else:
+        overall = (
+            0.55 * value_plausibility
+            + 0.45 * structural_integrity
+        )
+
+    overall = max(0.0, min(1.0, overall))
+
+    return AlgorithmicQualityScore(
+        overall=round(overall, 3),
+        completeness=round(completeness_score, 3),
+        target_integrity=round(target_integrity, 3) if target_integrity is not None else None,
+        value_plausibility=round(value_plausibility, 3),
+        structural_integrity=round(structural_integrity, 3),
+        flags=flags,
+    ).model_dump()
+
+
+def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_column: str | None = None) -> Dict[str, Any]:
     """
     Generate a DatasetProfile-compatible dict for the given dataframe.
     """
@@ -409,4 +555,9 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False) -> Dict[
 
     profile = DatasetProfile(row_count=row_count, columns=columns)
     # Return plain dict for JSON serialization
-    return profile.model_dump()
+    result = profile.model_dump()
+
+    # Compute and attach algorithmic quality score
+    result["algorithmic_quality_score"] = compute_quality_score(result, target_column=target_column)
+
+    return result

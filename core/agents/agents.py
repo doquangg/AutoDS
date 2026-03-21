@@ -7,13 +7,13 @@
 #
 #   1. Investigator Agent   — Reads the profile, calls tools, produces
 #                             InvestigationFindings (structured diagnosis).
-#                             Default model: gpt-5-2025-08-07
+#                             Default model: gpt-5.4
 #   2. Code Generator Agent — Reads findings, writes CleaningRecipe (Python code).
 #                             This is the ONLY agent that retries on sandbox errors.
-#                             Default model: gpt-4.1-2025-04-14
+#                             Default model: gpt-5.4-mini
 #   3. Answer Agent         — Reads model results + findings, writes the final
 #                             natural language answer.
-#                             Default model: gpt-4.1-2025-04-14
+#                             Default model: gpt-5.4-mini
 #
 # LLM CONFIGURATION:
 #   All agents use OpenAI's API. Set OPENAI_API_KEY in your environment.
@@ -36,7 +36,7 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 from core.pipeline.state import AgentState
-from core.schemas import InvestigationFindings, CleaningRecipe, CleanlinessEvaluation
+from core.schemas import InvestigationFindings, CleaningRecipe
 from core.runtime.tools import investigation_tools
 from core.logger import (
     log_llm_request, log_llm_response, log_investigation_findings,
@@ -47,7 +47,6 @@ from core.prompts import (
     INVESTIGATOR_REEXAM_PROMPT,
     CODEGEN_SYSTEM_PROMPT,
     ANSWER_SYSTEM_PROMPT,
-    EVALUATOR_SYSTEM_PROMPT,
 )
 
 
@@ -71,23 +70,23 @@ def _get_llm(model: str) -> ChatOpenAI:
 
 
 def get_investigator_llm() -> ChatOpenAI:
-    """Returns the LLM for the investigator agent (default: gpt-5.1-2025-11-13)."""
-    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5.1-2025-11-13"))
+    """Returns the LLM for the investigator agent (default: gpt-5.4)."""
+    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5.4"))
 
 
 def get_codegen_llm() -> ChatOpenAI:
-    """Returns the LLM for the code generator agent (default: gpt-5.1-2025-11-13)."""
-    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-5.1-2025-11-13"))
+    """Returns the LLM for the code generator agent (default: gpt-5.4-mini)."""
+    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-5.4-mini"))
 
 
 def get_answer_llm() -> ChatOpenAI:
-    """Returns the LLM for the answer agent (default: gpt-5.1-2025-11-13)."""
-    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-5.1-2025-11-13"))
+    """Returns the LLM for the answer agent (default: gpt-5.4-mini)."""
+    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-5.4-mini"))
 
 
-def get_evaluator_llm() -> ChatOpenAI:
-    """Returns the LLM for the evaluator agent (default: gpt-4.1-2025-04-14)."""
-    return _get_llm(os.environ.get("EVALUATOR_MODEL", "gpt-4.1-2025-04-14"))
+def get_target_selector_llm() -> ChatOpenAI:
+    """Returns the LLM for target column ranking (default: gpt-5.4-nano)."""
+    return _get_llm(os.environ.get("TARGET_SELECTOR_MODEL", "gpt-5.4-nano"))
 
 
 ################################################################################
@@ -146,15 +145,31 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
             for ph in pass_history:
                 history_lines.append(
                     f"  Pass {ph['pass_number']}: {ph['violations_found']} violations found, "
-                    f"quality={ph['quality_score']}, {ph['steps_executed']} steps executed, "
+                    f"quality={ph.get('quality_score', 'N/A')}, {ph['steps_executed']} steps executed, "
                     f"{ph['rows_after']} rows remaining"
                 )
             pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
+
+            # Summarize violations from previous pass so the investigator
+            # doesn't re-flag issues that were already addressed.
+            prev = state.get("previous_findings")
+            if prev:
+                violations = prev.violations if hasattr(prev, "violations") else []
+                viol_lines = []
+                for v in violations:
+                    cols = ", ".join(v.affected_columns) if hasattr(v, "affected_columns") else ""
+                    viol_lines.append(
+                        f"  [{v.severity}] {v.category} on [{cols}]: {v.suggested_action}"
+                    )
+                previous_violations = "\n".join(viol_lines) if viol_lines else "  (none)"
+            else:
+                previous_violations = "  (none)"
 
             system_prompt += INVESTIGATOR_REEXAM_PROMPT.format(
                 pass_number=pass_count + 1,
                 pass_history_summary=pass_history_summary,
                 target_column=state.get("target_column") or "not yet confirmed",
+                previous_violations=previous_violations,
             )
 
         # Include confirmed target column if set by human-in-the-loop selection
@@ -344,12 +359,10 @@ def run_answer_agent(state: AgentState) -> str:
             findings.model_dump() if hasattr(findings, "model_dump") else findings
         )
         caveats = findings_data.get("key_caveats", [])
-        quality = findings_data.get("data_quality_score", "unknown")
         violations = findings_data.get("violations", [])
 
         caveats_section = (
-            f"\nDATA QUALITY SCORE: {quality}\n"
-            f"VIOLATIONS FOUND: {len(violations)}\n"
+            f"\nVIOLATIONS FOUND: {len(violations)}\n"
             f"KEY CAVEATS:\n" + "\n".join(f"- {c}" for c in caveats)
         )
 
@@ -366,65 +379,3 @@ def run_answer_agent(state: AgentState) -> str:
     return response.content
 
 
-################################################################################
-# Agent 4: Evaluator
-#
-# INPUT:  post-cleaning profile + pass history
-# OUTPUT: CleanlinessEvaluation (is_data_clean, quality_score, rationale)
-#
-# This agent runs AFTER the sandbox executes cleaning code. It examines the
-# post-cleaning profile to decide whether data is clean enough for modeling.
-# This replaces the previous approach where the investigator set is_data_clean
-# before any cleaning code ran.
-################################################################################
-
-
-def run_evaluator_agent(state: AgentState) -> Dict[str, Any]:
-    """
-    Runs the evaluator agent on post-cleaning data.
-    Returns state updates including is_data_clean.
-    """
-    llm = get_evaluator_llm()
-    structured_llm = llm.with_structured_output(
-        CleanlinessEvaluation, method="function_calling"
-    )
-
-    profile_json = json.dumps(state["profile"], indent=2, default=str)
-
-    pass_history = state.get("pass_history", [])
-    history_lines = []
-    for ph in pass_history:
-        history_lines.append(
-            f"  Pass {ph['pass_number']}: {ph['violations_found']} violations found, "
-            f"quality={ph['quality_score']}, {ph['steps_executed']} steps executed, "
-            f"{ph['rows_after']} rows remaining"
-        )
-    pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
-
-    messages = [
-        SystemMessage(content=EVALUATOR_SYSTEM_PROMPT),
-        HumanMessage(content=(
-            f"POST-CLEANING DATASET PROFILE ({state['profile']['row_count']} rows):\n"
-            f"{profile_json}\n\n"
-            f"PASS HISTORY:\n{pass_history_summary}\n\n"
-            f"Evaluate whether this data is clean enough for modeling."
-        )),
-    ]
-
-    log_llm_request(
-        "evaluator", pass_count=state.get("pass_count", 0),
-        message_count=len(messages),
-        system_prompt_snippet=EVALUATOR_SYSTEM_PROMPT[:200],
-        user_message_snippet=messages[1].content[:300],
-    )
-
-    evaluation = structured_llm.invoke(messages)
-
-    log_llm_response(
-        "evaluator",
-        content=f"is_data_clean={evaluation.is_data_clean}, "
-                f"quality_score={evaluation.quality_score}, "
-                f"rationale={evaluation.rationale}",
-    )
-
-    return {"is_data_clean": evaluation.is_data_clean}
