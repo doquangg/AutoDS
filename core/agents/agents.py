@@ -71,23 +71,28 @@ def _get_llm(model: str) -> ChatOpenAI:
 
 
 def get_investigator_llm() -> ChatOpenAI:
-    """Returns the LLM for the investigator agent (default: gpt-5.1-2025-11-13)."""
-    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5.1-2025-11-13"))
+    """Returns the LLM for the investigator agent (default: gpt-5.4)."""
+    return _get_llm(os.environ.get("INVESTIGATOR_MODEL", "gpt-5.4"))
 
 
 def get_codegen_llm() -> ChatOpenAI:
-    """Returns the LLM for the code generator agent (default: gpt-5.1-2025-11-13)."""
-    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-5.1-2025-11-13"))
+    """Returns the LLM for the code generator agent (default: gpt-5.4-mini)."""
+    return _get_llm(os.environ.get("CODEGEN_MODEL", "gpt-5.4-mini"))
 
 
 def get_answer_llm() -> ChatOpenAI:
-    """Returns the LLM for the answer agent (default: gpt-5.1-2025-11-13)."""
-    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-5.1-2025-11-13"))
+    """Returns the LLM for the answer agent (default: gpt-5.4-mini)."""
+    return _get_llm(os.environ.get("ANSWER_MODEL", "gpt-5.4-mini"))
 
 
 def get_evaluator_llm() -> ChatOpenAI:
-    """Returns the LLM for the evaluator agent (default: gpt-4.1-2025-04-14)."""
-    return _get_llm(os.environ.get("EVALUATOR_MODEL", "gpt-4.1-2025-04-14"))
+    """Returns the LLM for the evaluator agent (default: gpt-5.4-nano)."""
+    return _get_llm(os.environ.get("EVALUATOR_MODEL", "gpt-5.4-nano"))
+
+
+def get_target_selector_llm() -> ChatOpenAI:
+    """Returns the LLM for target column ranking (default: gpt-5.4-nano)."""
+    return _get_llm(os.environ.get("TARGET_SELECTOR_MODEL", "gpt-5.4-nano"))
 
 
 ################################################################################
@@ -151,10 +156,26 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
                 )
             pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
 
+            # Summarize violations from previous pass so the investigator
+            # doesn't re-flag issues that were already addressed.
+            prev = state.get("previous_findings")
+            if prev:
+                violations = prev.violations if hasattr(prev, "violations") else []
+                viol_lines = []
+                for v in violations:
+                    cols = ", ".join(v.affected_columns) if hasattr(v, "affected_columns") else ""
+                    viol_lines.append(
+                        f"  [{v.severity}] {v.category} on [{cols}]: {v.suggested_action}"
+                    )
+                previous_violations = "\n".join(viol_lines) if viol_lines else "  (none)"
+            else:
+                previous_violations = "  (none)"
+
             system_prompt += INVESTIGATOR_REEXAM_PROMPT.format(
                 pass_number=pass_count + 1,
                 pass_history_summary=pass_history_summary,
                 target_column=state.get("target_column") or "not yet confirmed",
+                previous_violations=previous_violations,
             )
 
         # Include confirmed target column if set by human-in-the-loop selection

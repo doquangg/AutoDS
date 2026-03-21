@@ -81,7 +81,7 @@ from plugins.modeller import train_model
 ################################################################################
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-MAX_TOOL_CALLS = 30   # Cap on investigation tool calls to prevent runaway loops
+MAX_TOOL_CALLS = 15   # Cap on investigation tool calls to prevent runaway loops
 MAX_RETRIES = 3       # Max code generation retries on sandbox failure
 MAX_PASSES = 5        # Max cleaning passes before forcing move to modeling
 
@@ -259,6 +259,7 @@ def node_pass_reset(state: AgentState):
         "retry_count": 0,
         "tool_call_count": 0,
         "latest_error": None,
+        "previous_findings": state.get("investigation_findings"),
         "investigation_findings": None,
         "current_plan": None,
     }

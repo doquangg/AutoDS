@@ -22,7 +22,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from core.pipeline.state import AgentState
-from core.agents.agents import get_investigator_llm
+from core.agents.agents import get_target_selector_llm
 from core.logger import log_node
 from core.prompts import TARGET_RANKING_SYSTEM_PROMPT
 
@@ -63,7 +63,7 @@ def rank_target_candidates(
     Returns:
         Ranked list of TargetCandidate objects.
     """
-    llm = get_investigator_llm()
+    llm = get_target_selector_llm()
     structured_llm = llm.with_structured_output(
         TargetCandidateList, method="function_calling"
     )

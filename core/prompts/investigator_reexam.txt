@@ -4,6 +4,11 @@ IMPORTANT: The confirmed target column is {target_column}
 PREVIOUS PASSES:
 {pass_history_summary}
 
+VIOLATIONS ADDRESSED IN PREVIOUS PASS:
+{previous_violations}
+These violations were already addressed by cleaning code in the previous pass.
+Do NOT re-flag them unless the current profile shows clear evidence the fix failed.
+
 Your job on this pass:
 1. Review the NEW profile of the cleaned data
 2. Check whether the previous cleaning actions were effective
