@@ -422,9 +422,12 @@ def run_evaluator_agent(state: AgentState) -> Dict[str, Any]:
         )
     pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
 
+    target_col = state.get("target_column", "unknown")
+
     messages = [
         SystemMessage(content=EVALUATOR_SYSTEM_PROMPT),
         HumanMessage(content=(
+            f"TARGET COLUMN: {target_col}\n\n"
             f"POST-CLEANING DATASET PROFILE ({state['profile']['row_count']} rows):\n"
             f"{profile_json}\n\n"
             f"PASS HISTORY:\n{pass_history_summary}\n\n"

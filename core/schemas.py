@@ -6,7 +6,7 @@
 
 # Imports
 from typing import List, Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ################################################################################
 # LLM Action Enumerations:
@@ -226,7 +226,14 @@ class CleaningStep(BaseModel):
     step_id: int = Field(..., description="The execution order (1-indexed).")
     operation: OperationType = Field(..., description="The category of operation being performed.")
     target_column: Optional[str] = Field(None, description="The specific column being modified (if applicable).")
-    
+
+    @field_validator("target_column", mode="before")
+    @classmethod
+    def coerce_target_column(cls, v):
+        if isinstance(v, list):
+            return ", ".join(str(x) for x in v)
+        return v
+
     parameters: Dict[str, Any] = Field(
         default_factory=dict,
         description="Arguments for the operation."
