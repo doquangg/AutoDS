@@ -28,6 +28,7 @@ OperationType = Literal[
     "CUSTOM_CODE"
 ]
 
+
 ################################################################################
 # Schema Definitions for Profiler to Agent:
 # These schemas define the exact structure of the JSON files exchanged between
@@ -87,10 +88,38 @@ class ColumnProfile(BaseModel):
         description="List of strings flagging issues (e.g., 'High Cardinality', 'Constant Value', 'Possible PII')."
     )
 
+class AlgorithmicQualityScore(BaseModel):
+    """Deterministic quality score computed from profile statistics.
+
+    Unlike LLM-assessed scores, this is reproducible across model versions
+    and directly tied to measurable data properties.
+    """
+    overall: float = Field(..., description="Weighted composite score 0.0 (unusable) to 1.0 (pristine).")
+    completeness: float = Field(..., description="Average completeness across all columns. Informational only — not weighted in overall score (AutoGluon handles missing features).")
+    target_integrity: Optional[float] = Field(
+        None, description="Target column health: completeness minus penalties for inf/nan/sentinel. "
+                          "None if target_column not specified."
+    )
+    value_plausibility: float = Field(
+        ..., description="Penalizes heaping/template patterns where a single value dominates a numeric column."
+    )
+    structural_integrity: float = Field(
+        ..., description="Fraction of numeric columns free of inf/nan values."
+    )
+    flags: List[str] = Field(
+        default_factory=list,
+        description="Specific issues detected algorithmically (e.g., 'heaping: systolic_bp (120 in 73% of rows)')."
+    )
+
+
 # Schema definition for the entire dataset
 class DatasetProfile(BaseModel):
     row_count: int = Field(..., description="Total number of rows in the raw dataset.")
     columns: List[ColumnProfile] = Field(..., description="List of profiles for each column.")
+    algorithmic_quality_score: Optional[AlgorithmicQualityScore] = Field(
+        None, description="Deterministic quality score computed from profile statistics. "
+                          "This is the authoritative quality metric — LLM scores are advisory only."
+    )
 
 
 ################################################################################
@@ -175,45 +204,12 @@ class InvestigationFindings(BaseModel):
         description="List of columns being dropped and their reasons."
     )
     
-    data_quality_score: float = Field(
-        0.0, description="Overall quality score 0.0 (unusable) to 1.0 (pristine). "
-                         "Reflects severity and prevalence of violations."
-    )
-    
     key_caveats: List[str] = Field(
         default_factory=list,
         description="Important caveats the answer agent should mention when presenting results. "
                     "E.g., 'Income column was 40% sentinel values — predictions involving income may be unreliable.'"
     )
 
-
-
-
-################################################################################
-# Schema Definitions for Cleanliness Evaluation:
-# Post-cleaning assessment by the Evaluator agent. This runs AFTER the sandbox
-# executes cleaning code, examining the resulting profile to decide if the data
-# is clean enough for modeling.
-################################################################################
-
-class CleanlinessEvaluation(BaseModel):
-    """Output of the Evaluator agent after sandbox execution."""
-    is_data_clean: bool = Field(
-        ...,
-        description=(
-            "True if the data is clean enough for modeling and no further "
-            "cleaning passes are needed. True when: no CRITICAL violations "
-            "apparent from the profile, quality looks good, no obvious issues."
-        ),
-    )
-    quality_score: float = Field(
-        ...,
-        description="Overall quality score 0.0 (unusable) to 1.0 (pristine).",
-    )
-    rationale: str = Field(
-        ...,
-        description="Brief explanation of why the data is or isn't clean enough.",
-    )
 
 
 ################################################################################

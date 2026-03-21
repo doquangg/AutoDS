@@ -83,6 +83,5 @@ class AgentState(TypedDict):
 
     # --- Multi-Pass Control ---
     pass_count: int                 # Current pass number (0-indexed, incremented after sandbox success)
-    is_data_clean: bool             # Set by evaluator after sandbox execution
     pass_history: Annotated[List[Dict[str, Any]], operator.add]  # Compact per-pass summaries
     previous_findings: Optional[InvestigationFindings]  # Findings from prior pass, used to prevent re-flagging

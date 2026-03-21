@@ -13,8 +13,7 @@ YOUR TASKS:
    - PII: Names, emails, phone numbers, SSNs, addresses.
    - Constants: Columns with only one unique value.
    - Leaky features: Columns that encode the outcome or were generated after the fact.
-5. QUALITY SCORE: Assess overall data quality from 0.0 (unusable) to 1.0 (pristine).
-6. CAVEATS: Note any caveats that should accompany the final answer to the user.
+5. CAVEATS: Note any caveats that should accompany the final answer to the user.
 
 VIOLATION CATEGORIES:
 - SENTINEL_VALUE: Fake values masquerading as real data (-1, 0, 999, 9999, inf, -inf, "N/A", "Unknown", "None", "UNKNOWN"). Check for inf/infinity values in numeric columns — these will crash ML models.

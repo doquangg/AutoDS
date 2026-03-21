@@ -4,8 +4,8 @@
 # FLOW (multi-pass):
 #   START → profiler → target_selector → investigator ⟲ tools →
 #           code_generator → sandbox → [error?] → retry/fail
-#                                     → [success] → evaluator → [clean?] → autogluon
-#                                                              → [not clean] → pass_reset → profiler …
+#                                     → [success] → quality_gate → [score ≥ 0.75?] → autogluon
+#                                                                → [score < 0.75] → pass_reset → profiler …
 #         → autogluon → answer_agent → END
 #
 # KEY DESIGN DECISIONS:
@@ -15,12 +15,11 @@
 #   2. Tool loop cap: investigator can call at most MAX_TOOL_CALLS tools.
 #   3. Retry isolation: on sandbox failure, only code_generator re-runs.
 #      Investigation findings are preserved within a pass.
-#   4. Multi-pass loop: after a successful sandbox execution, the evaluator
-#      assesses cleanliness. The loop terminates when the evaluator declares
-#      the data clean or MAX_PASSES is reached.
-#   5. Clean-check is done by the evaluator AFTER sandbox execution, not by
-#      the investigator BEFORE code generation. This ensures that identified
-#      issues (like columns_to_drop) are acted on before cleanliness is judged.
+#   4. Multi-pass loop: after a successful sandbox execution, the quality_gate
+#      re-profiles the data and checks the algorithmic quality score.
+#      Termination is purely score-driven (≥ 0.75) or MAX_PASSES.
+#   5. Quality gate runs AFTER sandbox execution, not before code generation.
+#      This ensures that identified issues are acted on before quality is judged.
 #
 # GRAPH VISUALIZATION:
 #
@@ -43,15 +42,15 @@
 #     ├─[error?]─► code_generator   │  (retry, max 3)
 #     │                             │
 #     ▼                             │
-#   evaluator                       │
+#   quality_gate                    │
 #     │                             │
-#     ├─[clean?]──► autogluon       │
-#     │                │            │
-#     │              answer_agent   │
-#     │                │            │
-#     │              END            │
+#     ├─[score ≥ 0.75]─► autogluon  │
+#     │                    │        │
+#     │                 answer_agent │
+#     │                    │        │
+#     │                  END        │
 #     │                             │
-#     └─[not clean]─► pass_reset ───┘
+#     └─[score < 0.75]─► pass_reset ┘
 #
 ################################################################################
 
@@ -67,7 +66,7 @@ from langchain_core.messages import AIMessage
 
 # Local Imports
 from core.pipeline.state import AgentState
-from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent, run_evaluator_agent
+from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
 from core.agents.target_selector import select_target_column
 from core.runtime.sandbox import execute_cleaning_plan
 from core.runtime.tools import investigation_tools, set_working_df
@@ -96,15 +95,16 @@ def node_profiler(state: AgentState):
     Pure computation — no LLM involved.
     """
     print("--- [1] Profiling Data ---")
+    target_col = state.get("target_column")
     verbose = os.environ.get("AUTODS_VERBOSE", "").strip().lower()
     is_verbose_enabled = bool(verbose and verbose != "0")
     if is_verbose_enabled:
         # ydata and related libraries may still emit progress to stderr in some paths.
         # Keep terminal clean in verbose mode because detailed logs are persisted to file.
         with redirect_stderr(io.StringIO()):
-            profile = generate_profile(state["working_df"], detailed_profiler=True)
+            profile = generate_profile(state["working_df"], detailed_profiler=True, target_column=target_col)
     else:
-        profile = generate_profile(state["working_df"], detailed_profiler=True)
+        profile = generate_profile(state["working_df"], detailed_profiler=True, target_column=target_col)
     log_profile_summary(profile)
     return {"profile": profile}
 
@@ -137,7 +137,6 @@ def node_investigator(state: AgentState):
     findings = result.get("investigation_findings")
     if findings:
         log_node("investigator", "findings extracted",
-                 quality_score=getattr(findings, "data_quality_score", None),
                  violation_count=len(getattr(findings, "violations", [])))
 
     return result
@@ -194,10 +193,12 @@ def node_sandbox(state: AgentState):
 
         # Multi-pass tracking
         findings = state.get("investigation_findings")
+        profile = state.get("profile", {})
+        algo_score = profile.get("algorithmic_quality_score", {})
         pass_summary = {
             "pass_number": state.get("pass_count", 0),
             "violations_found": len(findings.violations) if findings and hasattr(findings, "violations") else 0,
-            "quality_score": findings.data_quality_score if findings and hasattr(findings, "data_quality_score") else None,
+            "quality_score": algo_score.get("overall") if algo_score else None,
             "steps_executed": len(new_logs),
             "rows_after": len(new_df),
         }
@@ -208,37 +209,32 @@ def node_sandbox(state: AgentState):
     return updates
 
 
-def node_evaluator(state: AgentState):
+def node_quality_gate(state: AgentState):
     """
-    LLM agent that assesses whether the post-cleaning data is clean enough
-    for modeling. Runs AFTER the sandbox successfully executes cleaning code.
-
-    Re-profiles the cleaned data first, then makes a single structured LLM
-    call to evaluate cleanliness.
+    Deterministic quality gate that re-profiles cleaned data and computes
+    the algorithmic quality score.  No LLM call — termination is decided
+    purely by ``route_quality_gate`` based on the score.
     """
     pass_num = state.get("pass_count", 0)
-    print(f"--- [4.5] Evaluator (pass: {pass_num}) ---")
+    print(f"--- [4.5] Quality Gate (pass: {pass_num}) ---")
 
-    # Re-profile the cleaned data so the evaluator sees the current state
+    # Re-profile the cleaned data
+    target_col = state.get("target_column")
     verbose = os.environ.get("AUTODS_VERBOSE", "").strip().lower()
     is_verbose_enabled = bool(verbose and verbose != "0")
     if is_verbose_enabled:
         with redirect_stderr(io.StringIO()):
-            profile = generate_profile(state["working_df"], detailed_profiler=True)
+            profile = generate_profile(state["working_df"], detailed_profiler=True, target_column=target_col)
     else:
-        profile = generate_profile(state["working_df"], detailed_profiler=True)
+        profile = generate_profile(state["working_df"], detailed_profiler=True, target_column=target_col)
 
     log_profile_summary(profile)
 
-    # Run evaluator with the fresh profile
-    eval_state = {**state, "profile": profile}
-    result = run_evaluator_agent(eval_state)
+    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
+    log_node("quality_gate", "profile recomputed",
+             algo_score=algo_score, pass_count=pass_num)
 
-    is_clean = result.get("is_data_clean", False)
-    log_node("evaluator", "assessment complete",
-             is_data_clean=is_clean, pass_count=pass_num)
-
-    return {"is_data_clean": is_clean, "profile": profile}
+    return {"profile": profile}
 
 
 def node_pass_reset(state: AgentState):
@@ -323,9 +319,9 @@ def route_investigator(state: AgentState):
     1. If the investigator requested tools and we're under the limit → "tools"
     2. Otherwise → "code_generator" (proceed with cleaning)
 
-    Note: Clean-check is now handled by the evaluator AFTER sandbox execution,
-    not here. The investigator always proceeds to code generation once tools
-    are done.
+    Note: Quality assessment is handled by the quality_gate AFTER sandbox
+    execution, not here. The investigator always proceeds to code generation
+    once tools are done.
     """
     # --- Tool loop check ---
     for msg in reversed(state.get("investigator_messages", [])):
@@ -361,7 +357,7 @@ def route_sandbox(state: AgentState):
 
     - Error + retries left → "retry" (back to code_generator)
     - Error + retries exhausted → "failed" (END)
-    - Success → "evaluate" (evaluator assesses cleanliness)
+    - Success → "evaluate" (quality_gate re-profiles and checks score)
     """
     latest_error = state.get("latest_error")
     retry_count = state.get("retry_count", 0)
@@ -383,33 +379,41 @@ def route_sandbox(state: AgentState):
     return "evaluate"
 
 
-def route_evaluator(state: AgentState):
-    """
-    After the evaluator runs, decide next step.
+QUALITY_GATE_THRESHOLD = 0.75  # Algorithmic score at or above this → data is clean
 
-    - is_data_clean=True → "done" (autogluon)
-    - pass_count >= MAX_PASSES → "done" (autogluon, forced)
-    - Otherwise → "next_pass" (pass_reset → profiler loop)
+def route_quality_gate(state: AgentState):
     """
-    is_clean = state.get("is_data_clean", False)
+    Purely score-driven termination.
+
+    - algorithmic score >= QUALITY_GATE_THRESHOLD → "done" (autogluon)
+    - pass_count >= MAX_PASSES → "done" (exhausted passes)
+    - Otherwise → "next_pass"
+    """
     pass_count = state.get("pass_count", 0)
+    profile = state.get("profile") or {}
+    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
 
-    if is_clean:
-        print(f">>> Evaluator declares data clean on pass {pass_count}. "
-              f"Moving to modeling.")
-        log_routing("route_evaluator", "done",
-                    reason="is_data_clean=True", pass_count=pass_count)
+    if algo_score is not None and algo_score >= QUALITY_GATE_THRESHOLD:
+        print(f">>> Quality gate passed: algorithmic score {algo_score:.2f} >= "
+              f"{QUALITY_GATE_THRESHOLD}. Moving to modeling.")
+        log_routing("route_quality_gate", "done",
+                    reason="score_threshold", algo_score=algo_score,
+                    pass_count=pass_count)
         return "done"
 
     if pass_count >= MAX_PASSES:
-        print(f">>> Max passes ({MAX_PASSES}) reached. Moving to modeling.")
-        log_routing("route_evaluator", "done",
-                    reason="max_passes", pass_count=pass_count,
-                    max_passes=MAX_PASSES)
+        print(f">>> Max passes ({MAX_PASSES}) reached (score={algo_score}). "
+              f"Moving to modeling.")
+        log_routing("route_quality_gate", "done",
+                    reason="max_passes", algo_score=algo_score,
+                    pass_count=pass_count, max_passes=MAX_PASSES)
         return "done"
 
-    log_routing("route_evaluator", "next_pass",
-                pass_count=pass_count, max_passes=MAX_PASSES)
+    print(f">>> Quality gate: score {algo_score:.2f} < {QUALITY_GATE_THRESHOLD}. "
+          f"Starting pass {pass_count + 1}.")
+    log_routing("route_quality_gate", "next_pass",
+                algo_score=algo_score, pass_count=pass_count,
+                max_passes=MAX_PASSES)
     return "next_pass"
 
 
@@ -426,7 +430,7 @@ workflow.add_node("investigator",      node_investigator)
 workflow.add_node("tools",          ToolNode(investigation_tools, messages_key="investigator_messages"))
 workflow.add_node("code_generator", node_code_generator)
 workflow.add_node("sandbox",        node_sandbox)
-workflow.add_node("evaluator",      node_evaluator)
+workflow.add_node("quality_gate",   node_quality_gate)
 workflow.add_node("pass_reset",     node_pass_reset)
 workflow.add_node("autogluon",      node_autogluon)
 workflow.add_node("answer_agent",   node_answer)
@@ -451,23 +455,23 @@ workflow.add_edge("tools", "investigator")  # Tool results go back to investigat
 # Code generator → sandbox (always)
 workflow.add_edge("code_generator", "sandbox")
 
-# Sandbox: retry on error, or evaluate cleanliness on success
+# Sandbox: retry on error, or check quality on success
 workflow.add_conditional_edges(
     "sandbox",
     route_sandbox,
     {
         "retry": "code_generator",      # Only re-generate code, not re-investigate
-        "evaluate": "evaluator",        # Success: evaluate cleanliness
+        "evaluate": "quality_gate",     # Success: re-profile and check score
         "failed": END,
     }
 )
 
-# Evaluator: clean → modeling, not clean → another pass
+# Quality gate: score-driven termination
 workflow.add_conditional_edges(
-    "evaluator",
-    route_evaluator,
+    "quality_gate",
+    route_quality_gate,
     {
-        "done": "autogluon",            # Data is clean or max passes reached
+        "done": "autogluon",            # Score >= threshold or max passes
         "next_pass": "pass_reset",      # Another cleaning pass needed
     }
 )

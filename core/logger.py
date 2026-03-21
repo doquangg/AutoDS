@@ -123,8 +123,6 @@ def log_investigation_findings(findings) -> None:
         f"INVESTIGATION_FINDINGS",
         f"  target_column: {data.get('target_column')}",
         f"  task_type: {data.get('task_type')}",
-        f"  data_quality_score: {data.get('data_quality_score')}",
-        f"  is_data_clean: {data.get('is_data_clean')}",
         f"  columns_to_drop: {data.get('columns_to_drop', [])}",
         f"  violations ({len(violations)}):",
     ]
