@@ -19,9 +19,10 @@ export OPENAI_API_KEY=sk-...
 ```
 3) Optionally override the default models per agent role:
 ```
-export INVESTIGATOR_MODEL=gpt-5.1-2025-11-13   # default
-export CODEGEN_MODEL=gpt-5.1-2025-11-13     # default
-export ANSWER_MODEL=gpt-5.1-2025-11-13      # default
+export INVESTIGATOR_MODEL=gpt-5.4         # default
+export CODEGEN_MODEL=gpt-5.4-mini         # default
+export ANSWER_MODEL=gpt-5.4-mini          # default
+export TARGET_SELECTOR_MODEL=gpt-5.4-nano # default
 ```
 4) To run the system, use one of the three commands below:
 ```
