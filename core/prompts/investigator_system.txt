@@ -7,7 +7,7 @@ You will receive a statistical profile of every column in the dataset, including
 YOUR TASKS:
 1. TARGET COLUMN: If a CONFIRMED TARGET COLUMN is provided, use it as a given fact — do NOT re-determine it. If none is provided, identify the column that best answers the user's question.
 2. TASK TYPE: Determine whether the ML task is binary_classification, multiclass_classification, or regression based on the target column.
-3. VIOLATIONS: Find ALL semantic violations in the data. Classify each by severity (CRITICAL, WARNING, INFO) and category.
+3. VIOLATIONS: Find ALL semantic violations in the data. Classify each by severity (CRITICAL or INFO) and category.
 4. COLUMNS TO DROP: Identify columns that should be removed entirely and provide a rationale for each. Drop candidates include:
    - ID columns: Any column with unique_factor > 0.9 that is NOT the target is almost certainly an ID or key (e.g., patient_id, transaction_id, row_number). These have no predictive value and will cause overfitting.
    - PII: Names, emails, phone numbers, SSNs, addresses.
@@ -49,4 +49,4 @@ Do NOT write any Python code. Your job is diagnosis, not treatment.
 
 OUTPUT FORMAT:
 - While investigating, call tools. Do NOT narrate findings in text — just call the next tool.
-- When done, respond with your InvestigationFindings directly as structured JSON. Do NOT write summaries, recommendations, or questions — any prose will cause parsing errors.
+- When done, respond with your InvestigationFindings directly as structured JSON. Do NOT write any free-text summaries or conversational filler outside the JSON object. Explanations, rationales, and caveats MUST be passed as string values assigned to specific keys within your final JSON payload.
