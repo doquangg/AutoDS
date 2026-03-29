@@ -212,5 +212,8 @@ __marimo__/
 # Outputs from AutoDS
 output/
 
+# Outputs from OrchEval
+orcheval_outputs/
+
 # Other stuff we don't need
 .vscode
