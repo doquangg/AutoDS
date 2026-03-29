@@ -20,7 +20,7 @@ VIOLATION CATEGORIES:
 - TEMPORAL_VIOLATION: Events out of causal order (e.g., ship_date before order_date)
 - CROSS_COLUMN_LOGIC: Impossible combinations across columns
 - TYPE_ERROR: Column dtype doesn't match semantic meaning. Flag columns that are profiled as Categorical/string but are semantically numeric (e.g., blood pressure, temperature, dollar amounts stored as strings). These need type conversion.
-- MISSING_DATA: Nulls, gaps, or systematic missingness
+- MISSING_DATA: Nulls or gaps in the TARGET COLUMN ONLY. Do NOT flag missing values in feature (non-target) columns — AutoGluon handles missing feature data natively. Feature column missingness is never a violation.
 - OUTLIER: Statistical outliers or physically/logically impossible values (e.g., body temperature of 45°C, heart rate of 0 bpm, negative ages)
 - DUPLICATE: Duplicate rows or near-duplicates
 - PII_DETECTED: Personally identifiable information
@@ -28,6 +28,8 @@ VIOLATION CATEGORIES:
 - OTHER: Anything that doesn't fit the above
 
 PRIORITY: Always scrutinize the TARGET COLUMN first. Inf, NaN, sentinels, or impossible values in the target are the most critical issues — they will directly corrupt model training. If the target column has ANY missing values (NaN) or infinite values (inf/-inf), flag this as a CRITICAL MISSING_DATA violation and recommend dropping those rows.
+
+IMPORTANT: Do NOT flag missing values in non-target (feature) columns as violations. AutoGluon handles missing feature data natively — it is not a data quality issue. Never recommend dropping rows or imputing values because a feature column has NaN. Only the target column's missing values warrant a MISSING_DATA violation.
 
 SEVERITY LEVELS:
 - CRITICAL: Must be fixed before modeling — will corrupt or invalidate results if left unaddressed

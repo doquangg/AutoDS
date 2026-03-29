@@ -1,12 +1,14 @@
 ################################################################################
 # LangGraph state machine for the AutoDS pipeline.
 #
-# FLOW (multi-pass):
+# FLOW (multi-pass with three-tier quality assessment):
 #   START → profiler → target_selector → investigator ⟲ tools →
 #           code_generator → sandbox → [error?] → retry/fail
-#                                     → [success] → quality_gate → [score ≥ 0.75?] → autogluon
-#                                                                → [score < 0.75] → pass_reset → profiler …
-#         → autogluon → answer_agent → END
+#                                     → [success] → quality_gate (Tiers 1&2)
+#                                                    → [hard blocker?] → pass_reset
+#                                                    → quality_assessor ⟲ tools (Tier 3)
+#                                                       → [stop?] → autogluon → answer → END
+#                                                       → [continue?] → pass_reset → profiler …
 #
 # KEY DESIGN DECISIONS:
 #   1. SPLIT: investigator (diagnosis) and code_generator (Python code) are
@@ -15,42 +17,51 @@
 #   2. Tool loop cap: investigator can call at most MAX_TOOL_CALLS tools.
 #   3. Retry isolation: on sandbox failure, only code_generator re-runs.
 #      Investigation findings are preserved within a pass.
-#   4. Multi-pass loop: after a successful sandbox execution, the quality_gate
-#      re-profiles the data and checks the algorithmic quality score.
-#      Termination is purely score-driven (≥ 0.75) or MAX_PASSES.
+#   4. THREE-TIER quality assessment after each successful sandbox execution:
+#        Tier 1: Structural checks (completeness, inf/nan) — deterministic, free
+#        Tier 2: Statistical anomaly summary (z-score, IQR) — deterministic, cheap
+#        Tier 3: LLM quality assessor agent with investigation tools — semantic
+#      Termination is driven by the LLM assessor's recommendation or MAX_PASSES.
 #   5. Quality gate runs AFTER sandbox execution, not before code generation.
-#      This ensures that identified issues are acted on before quality is judged.
+#   6. Residual issues from the assessor are fed to the next investigator pass.
 #
 # GRAPH VISUALIZATION:
 #
 #   START
 #     │
 #     ▼
-#   profiler ◄──────────────────────┐
-#     │                             │
-#     ▼                             │
-#   investigator ◄──┐               │
-#     │              │              │
-#     ├─[tools?]─► tools            │
-#     │                             │
-#     ▼                             │
-#   code_generator                  │
-#     │                             │
-#     ▼                             │
-#   sandbox                         │
-#     │                             │
-#     ├─[error?]─► code_generator   │  (retry, max 3)
-#     │                             │
-#     ▼                             │
-#   quality_gate                    │
-#     │                             │
-#     ├─[score ≥ 0.75]─► autogluon  │
-#     │                    │        │
-#     │                 answer_agent │
-#     │                    │        │
-#     │                  END        │
-#     │                             │
-#     └─[score < 0.75]─► pass_reset ┘
+#   profiler ◄──────────────────────────────┐
+#     │                                     │
+#     ▼                                     │
+#   investigator ◄──┐                       │
+#     │              │                      │
+#     ├─[tools?]─► tools                    │
+#     │                                     │
+#     ▼                                     │
+#   code_generator                          │
+#     │                                     │
+#     ▼                                     │
+#   sandbox                                 │
+#     │                                     │
+#     ├─[error?]─► code_generator (retry)   │
+#     │                                     │
+#     ▼                                     │
+#   quality_gate (Tiers 1&2)                │
+#     │                                     │
+#     ├─[hard blocker]──────► pass_reset ───┘
+#     │                                     │
+#     ▼                                     │
+#   quality_assessor ◄──┐   (Tier 3)        │
+#     │                  │                  │
+#     ├─[tools?]─► assessor_tools           │
+#     │                                     │
+#     ├─[stop]──► autogluon                 │
+#     │              │                      │
+#     │           answer_agent              │
+#     │              │                      │
+#     │            END                      │
+#     │                                     │
+#     └─[continue]──► pass_reset ───────────┘
 #
 ################################################################################
 
@@ -66,12 +77,14 @@ from langchain_core.messages import AIMessage
 
 # Local Imports
 from core.pipeline.state import AgentState
+from core.schemas import QualityAssessment, AnomalySummary
 from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
+from core.agents.quality_assessor import run_quality_assessor_agent
 from core.agents.target_selector import select_target_column
 from core.runtime.sandbox import execute_cleaning_plan
 from core.runtime.tools import investigation_tools, set_working_df
 from core.logger import log_node, log_routing, log_profile_summary
-from plugins.profiler import generate_profile
+from plugins.profiler import generate_profile, compute_structural_score, compute_anomaly_summary
 from plugins.modeller import train_model
 
 
@@ -193,12 +206,9 @@ def node_sandbox(state: AgentState):
 
         # Multi-pass tracking
         findings = state.get("investigation_findings")
-        profile = state.get("profile", {})
-        algo_score = profile.get("algorithmic_quality_score", {})
         pass_summary = {
             "pass_number": state.get("pass_count", 0),
             "violations_found": len(findings.violations) if findings and hasattr(findings, "violations") else 0,
-            "quality_score": algo_score.get("overall") if algo_score else None,
             "steps_executed": len(new_logs),
             "rows_after": len(new_df),
         }
@@ -211,9 +221,13 @@ def node_sandbox(state: AgentState):
 
 def node_quality_gate(state: AgentState):
     """
-    Deterministic quality gate that re-profiles cleaned data and computes
-    the algorithmic quality score.  No LLM call — termination is decided
-    purely by ``route_quality_gate`` based on the score.
+    Three-tier quality gate:
+      Tier 1: Re-profile data and compute structural score (deterministic)
+      Tier 2: Compute anomaly summary (deterministic)
+      Tier 3: LLM quality assessor agent (launched as separate node)
+
+    This node handles Tiers 1 & 2 and prepares context for Tier 3.
+    The assessor agent runs in its own node (node_quality_assessor).
     """
     pass_num = state.get("pass_count", 0)
     print(f"--- [4.5] Quality Gate (pass: {pass_num}) ---")
@@ -230,34 +244,102 @@ def node_quality_gate(state: AgentState):
 
     log_profile_summary(profile)
 
-    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
-    log_node("quality_gate", "profile recomputed",
-             algo_score=algo_score, pass_count=pass_num)
+    # Tier 1: Structural score
+    structural_data = compute_structural_score(profile, target_column=target_col)
+    log_node("quality_gate", "structural score computed",
+             structural_score=structural_data["structural_score"],
+             pass_count=pass_num)
 
-    return {"profile": profile}
+    # Tier 2: Anomaly summary
+    anomaly_data = compute_anomaly_summary(state["working_df"])
+    log_node("quality_gate", "anomaly summary computed",
+             total_anomalous_rows=anomaly_data["total_anomalous_rows"],
+             columns_with_anomalies=len(anomaly_data["column_summaries"]))
+
+    # Check for structural hard blockers before invoking LLM
+    has_hard_blocker = any("target_inf_nan" in f for f in structural_data.get("flags", []))
+
+    return {
+        "profile": profile,
+        "quality_assessment": {
+            "structural_score": structural_data["structural_score"],
+            "structural_data": structural_data,
+            "anomaly_summary": anomaly_data,
+            "has_hard_blocker": has_hard_blocker,
+        },
+        # Reset assessor state for this pass
+        "assessor_messages": ["__RESET__"],
+        "assessor_tool_call_count": 0,
+    }
+
+
+def node_quality_assessor(state: AgentState):
+    """
+    Tier 3: LLM quality assessor agent with investigation tools.
+
+    Receives profile + anomaly summary + cleaning history, investigates
+    the data using tools, and produces a structured quality assessment.
+    """
+    pass_num = state.get("pass_count", 0)
+    assessor_tool_count = state.get("assessor_tool_call_count", 0)
+    print(f"--- [4.6] Quality Assessor (pass: {pass_num}, tool calls: {assessor_tool_count}) ---")
+
+    # Give tools access to the current DataFrame
+    set_working_df(state["working_df"])
+
+    qa = state.get("quality_assessment", {})
+    structural_data = qa.get("structural_data", {})
+    anomaly_data = qa.get("anomaly_summary", {})
+
+    result = run_quality_assessor_agent(
+        state,
+        structural_score_data=structural_data,
+        anomaly_summary_data=anomaly_data,
+    )
+
+    # If assessment is complete, build the full QualityAssessment
+    assessment = result.pop("llm_quality_assessment", None)
+    if assessment:
+        full_assessment = QualityAssessment(
+            structural_score=qa.get("structural_score", 0.0),
+            anomaly_summary=AnomalySummary(**anomaly_data),
+            llm_assessment=assessment,
+            recommendation=assessment.recommendation,
+            flags=structural_data.get("flags", []),
+        ).model_dump()
+
+        result["quality_assessment"] = full_assessment
+        result["residual_issues"] = assessment.residual_issues if assessment.residual_issues else None
+
+    return result
 
 
 def node_pass_reset(state: AgentState):
     """
     Resets per-pass state fields before starting a new cleaning iteration.
 
-    Preserves: working_df, clean_df, cleaning_history, pass_count, pass_history.
+    Preserves: working_df, clean_df, cleaning_history, pass_count, pass_history,
+               residual_issues (from assessor → next investigator).
     Resets: messages, retry_count, tool_call_count, error state.
     """
     print(f"\n--- [Loop] Starting Pass {state.get('pass_count', 0)} ---")
     log_node("pass_reset", "resetting per-pass state",
              pass_count=state.get("pass_count", 0),
-             fields_reset="investigator_messages, codegen_messages, retry_count, "
-                          "tool_call_count, latest_error, investigation_findings, current_plan")
+             fields_reset="investigator_messages, codegen_messages, assessor_messages, "
+                          "retry_count, tool_call_count, latest_error, "
+                          "investigation_findings, current_plan")
     return {
         "investigator_messages": ["__RESET__"],
         "codegen_messages": ["__RESET__"],
+        "assessor_messages": ["__RESET__"],
         "retry_count": 0,
         "tool_call_count": 0,
+        "assessor_tool_call_count": 0,
         "latest_error": None,
         "previous_findings": state.get("investigation_findings"),
         "investigation_findings": None,
         "current_plan": None,
+        # residual_issues is deliberately NOT reset — it flows from assessor to investigator
     }
 
 def node_autogluon(state: AgentState):
@@ -312,34 +394,41 @@ def node_answer(state: AgentState):
 # Routing Logic
 ################################################################################
 
+def _route_tool_loop(state, messages_key, count_key, max_calls, tool_dest, log_name):
+    """
+    Shared routing logic for tool-calling agent loops.
+
+    Checks the latest AI message for tool calls. Returns tool_dest if the
+    agent wants more tools and is under the limit, None otherwise.
+    """
+    for msg in reversed(state.get(messages_key, [])):
+        if isinstance(msg, AIMessage):
+            has_tool_calls = hasattr(msg, "tool_calls") and msg.tool_calls
+            under_limit = state.get(count_key, 0) < max_calls
+
+            if has_tool_calls and under_limit:
+                log_routing(log_name, tool_dest,
+                            has_tool_calls=True,
+                            tool_call_count=state.get(count_key, 0))
+                return tool_dest
+
+            if has_tool_calls and not under_limit:
+                print(f"!!! Tool call limit reached ({max_calls}). "
+                      f"Forcing {log_name.replace('route_', '')} to finalize.")
+            break
+    return None
+
+
 def route_investigator(state: AgentState):
     """
     After the investigator runs, decide whether to call tools or proceed to cleaning.
-
-    1. If the investigator requested tools and we're under the limit → "tools"
-    2. Otherwise → "code_generator" (proceed with cleaning)
-
-    Note: Quality assessment is handled by the quality_gate AFTER sandbox
-    execution, not here. The investigator always proceeds to code generation
-    once tools are done.
     """
-    # --- Tool loop check ---
-    for msg in reversed(state.get("investigator_messages", [])):
-        if isinstance(msg, AIMessage):
-            has_tool_calls = hasattr(msg, "tool_calls") and msg.tool_calls
-            under_limit = state.get("tool_call_count", 0) < MAX_TOOL_CALLS
-
-            if has_tool_calls and under_limit:
-                log_routing("route_investigator", "tools",
-                            has_tool_calls=True,
-                            tool_call_count=state.get("tool_call_count", 0),
-                            max_tool_calls=MAX_TOOL_CALLS)
-                return "tools"
-
-            if has_tool_calls and not under_limit:
-                print(f"!!! Tool call limit reached ({MAX_TOOL_CALLS}). "
-                      f"Forcing investigator to finalize.")
-            break
+    result = _route_tool_loop(
+        state, "investigator_messages", "tool_call_count",
+        MAX_TOOL_CALLS, "tools", "route_investigator"
+    )
+    if result:
+        return result
 
     pass_count = state.get("pass_count", 0)
     findings = state.get("investigation_findings")
@@ -379,61 +468,111 @@ def route_sandbox(state: AgentState):
     return "evaluate"
 
 
-QUALITY_GATE_THRESHOLD = 0.75  # Algorithmic score at or above this → data is clean
-
 def route_quality_gate(state: AgentState):
     """
-    Purely score-driven termination.
+    After Tiers 1 & 2, decide whether to invoke the LLM assessor or skip.
 
-    - algorithmic score >= QUALITY_GATE_THRESHOLD → "done" (autogluon)
-    - pass_count >= MAX_PASSES → "done" (exhausted passes)
-    - Otherwise → "next_pass"
+    - Max passes reached → skip LLM, go straight to modeling
+    - Structural hard blockers (with passes remaining) → skip LLM, loop back
+    - Otherwise → invoke assessor for semantic evaluation
     """
+    qa = state.get("quality_assessment", {})
+    has_hard_blocker = qa.get("has_hard_blocker", False)
     pass_count = state.get("pass_count", 0)
-    profile = state.get("profile") or {}
-    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
 
-    if algo_score is not None and algo_score >= QUALITY_GATE_THRESHOLD:
-        print(f">>> Quality gate passed: algorithmic score {algo_score:.2f} >= "
-              f"{QUALITY_GATE_THRESHOLD}. Moving to modeling.")
+    if pass_count >= MAX_PASSES:
+        print(f">>> Max passes ({MAX_PASSES}) reached. Skipping LLM assessment, moving to modeling.")
         log_routing("route_quality_gate", "done",
-                    reason="score_threshold", algo_score=algo_score,
+                    reason="max_passes", pass_count=pass_count)
+        return "done"
+
+    if has_hard_blocker:
+        print(f">>> Quality gate: structural hard blocker detected. Skipping LLM assessment.")
+        log_routing("route_quality_gate", "next_pass",
+                    reason="hard_blocker", pass_count=pass_count)
+        return "next_pass"
+
+    log_routing("route_quality_gate", "assess",
+                reason="invoke_assessor", pass_count=pass_count)
+    return "assess"
+
+
+def route_quality_assessor(state: AgentState):
+    """
+    After the quality assessor runs, decide next step:
+      - Wants more tools → "assessor_tools"
+      - Assessment complete, recommends stop → "done"
+      - Assessment complete, recommends continue → "next_pass"
+      - Max passes reached → "done" (safety valve)
+    """
+    from core.agents.quality_assessor import MAX_ASSESSOR_TOOL_CALLS
+
+    result = _route_tool_loop(
+        state, "assessor_messages", "assessor_tool_call_count",
+        MAX_ASSESSOR_TOOL_CALLS, "assessor_tools", "route_quality_assessor"
+    )
+    if result:
+        return result
+
+    # Assessment complete — route based on recommendation
+    pass_count = state.get("pass_count", 0)
+    qa = state.get("quality_assessment", {})
+    llm_assessment = qa.get("llm_assessment")
+    recommendation = qa.get("recommendation", "continue_cleaning")
+    llm_score = llm_assessment.get("score") if isinstance(llm_assessment, dict) else None
+
+    if pass_count >= MAX_PASSES:
+        print(f">>> Max passes ({MAX_PASSES}) reached (LLM score={llm_score}). "
+              f"Moving to modeling.")
+        log_routing("route_quality_assessor", "done",
+                    reason="max_passes", llm_score=llm_score,
                     pass_count=pass_count)
         return "done"
 
-    if pass_count >= MAX_PASSES:
-        print(f">>> Max passes ({MAX_PASSES}) reached (score={algo_score}). "
+    if recommendation == "stop_cleaning":
+        print(f">>> Quality assessor recommends STOP (score={llm_score}). "
               f"Moving to modeling.")
-        log_routing("route_quality_gate", "done",
-                    reason="max_passes", algo_score=algo_score,
-                    pass_count=pass_count, max_passes=MAX_PASSES)
+        log_routing("route_quality_assessor", "done",
+                    reason="assessor_stop", llm_score=llm_score,
+                    pass_count=pass_count)
         return "done"
 
-    print(f">>> Quality gate: score {algo_score:.2f} < {QUALITY_GATE_THRESHOLD}. "
+    print(f">>> Quality assessor recommends CONTINUE (score={llm_score}). "
           f"Starting pass {pass_count + 1}.")
-    log_routing("route_quality_gate", "next_pass",
-                algo_score=algo_score, pass_count=pass_count,
-                max_passes=MAX_PASSES)
+    log_routing("route_quality_assessor", "next_pass",
+                llm_score=llm_score, pass_count=pass_count,
+                residual_issues=len(qa.get("llm_assessment", {}).get("residual_issues", [])))
     return "next_pass"
 
 
 ################################################################################
 # Graph Assembly
+#
+# FLOW (three-tier quality assessment):
+#   START → profiler → target_selector → investigator ⟲ tools →
+#           code_generator → sandbox → [error?] → retry/fail
+#                                     → [success] → quality_gate (Tiers 1&2)
+#                                                    → [hard blocker?] → pass_reset
+#                                                    → quality_assessor ⟲ assessor_tools (Tier 3)
+#                                                       → [stop?] → autogluon → answer → END
+#                                                       → [continue?] → pass_reset → profiler …
 ################################################################################
 
 workflow = StateGraph(AgentState)
 
 # --- Nodes ---
-workflow.add_node("profiler",          node_profiler)
-workflow.add_node("target_selector",   node_target_selector)
-workflow.add_node("investigator",      node_investigator)
-workflow.add_node("tools",          ToolNode(investigation_tools, messages_key="investigator_messages"))
-workflow.add_node("code_generator", node_code_generator)
-workflow.add_node("sandbox",        node_sandbox)
-workflow.add_node("quality_gate",   node_quality_gate)
-workflow.add_node("pass_reset",     node_pass_reset)
-workflow.add_node("autogluon",      node_autogluon)
-workflow.add_node("answer_agent",   node_answer)
+workflow.add_node("profiler",            node_profiler)
+workflow.add_node("target_selector",     node_target_selector)
+workflow.add_node("investigator",        node_investigator)
+workflow.add_node("tools",               ToolNode(investigation_tools, messages_key="investigator_messages"))
+workflow.add_node("code_generator",      node_code_generator)
+workflow.add_node("sandbox",             node_sandbox)
+workflow.add_node("quality_gate",        node_quality_gate)
+workflow.add_node("quality_assessor",    node_quality_assessor)
+workflow.add_node("assessor_tools",      ToolNode(investigation_tools, messages_key="assessor_messages"))
+workflow.add_node("pass_reset",          node_pass_reset)
+workflow.add_node("autogluon",           node_autogluon)
+workflow.add_node("answer_agent",        node_answer)
 
 # --- Edges ---
 # Linear flow: START → profiler → target_selector → investigator
@@ -460,21 +599,34 @@ workflow.add_conditional_edges(
     "sandbox",
     route_sandbox,
     {
-        "retry": "code_generator",      # Only re-generate code, not re-investigate
-        "evaluate": "quality_gate",     # Success: re-profile and check score
+        "retry": "code_generator",       # Only re-generate code, not re-investigate
+        "evaluate": "quality_gate",      # Success: re-profile and check score
         "failed": END,
     }
 )
 
-# Quality gate: score-driven termination
+# Quality gate (Tiers 1&2): check for hard blockers or invoke assessor
 workflow.add_conditional_edges(
     "quality_gate",
     route_quality_gate,
     {
-        "done": "autogluon",            # Score >= threshold or max passes
-        "next_pass": "pass_reset",      # Another cleaning pass needed
+        "assess": "quality_assessor",    # No hard blockers → invoke LLM assessor
+        "next_pass": "pass_reset",       # Hard blocker → skip LLM, loop back
+        "done": "autogluon",             # Max passes exhausted → skip LLM, model
     }
 )
+
+# Quality assessor (Tier 3): tool loop, or route based on assessment
+workflow.add_conditional_edges(
+    "quality_assessor",
+    route_quality_assessor,
+    {
+        "assessor_tools": "assessor_tools",  # Assessor wants more data
+        "done": "autogluon",                 # Assessor says stop or max passes
+        "next_pass": "pass_reset",           # Assessor says continue
+    }
+)
+workflow.add_edge("assessor_tools", "quality_assessor")  # Tool results go back to assessor
 
 # Pass reset → profiler (loop back)
 workflow.add_edge("pass_reset", "profiler")

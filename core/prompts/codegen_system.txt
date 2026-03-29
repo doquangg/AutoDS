@@ -29,14 +29,15 @@ RULES:
 - Steps execute in order. Each step receives the `df` from the previous step.
 - Do NOT use StandardScaler or MinMaxScaler. These fit statistics (mean/std/min/max) on the full dataset. If applied before AutoGluon splits into train/test, test-set statistics leak into training. AutoGluon handles its own internal preprocessing, so scaling is both dangerous and redundant.
 - Do NOT create new columns or derived features (e.g., indicator columns, binned columns, interaction terms). Feature engineering is handled separately after cleaning. Your job is strictly to clean, not to add.
-- Do NOT impute missing values. Imputation is handled separately to avoid data leakage. However, you MUST drop rows hwere the target column contains NaN. After all sentinel-to-NaN conversions and inf replacements, any row with a NaN target is useless for supervised learning and must be removed. Use: `df = df.dropna(subset=['<target_column>'])`.
+- Do NOT impute missing values. Imputation is handled separately to avoid data leakage. However, you MUST drop rows where the target column contains NaN. After all sentinel-to-NaN conversions and inf replacements, any row with a NaN target is useless for supervised learning and must be removed. Use: `df = df.dropna(subset=['<target_column>'])`.
+- Do NOT drop rows based on missing values in feature columns (non-target columns). AutoGluon handles missing feature data natively, so dropping rows for feature NaN values wastes training data. Only the target column justifies DROP_ROWS due to NaN.
 - Replace inf and -inf values with NaN using `df.replace([np.inf, -np.inf], np.nan)` or column-specific replacements. Infinite values will crash ML models.
 - When converting string columns to numeric, use range-based checks rather than exact-value checks (e.g., ensure the column is cast to numeric first, then use `df.loc[df['temp'] > 43, 'temp'] = np.nan`). This catches all impossible values, not just the ones you happen to know about.
 - Do NOT drop or rename the target column, but DO clean it (remove inf, sentinels, impossible values by setting them to NaN).
 
 STEP ORDERING:
 - Always convert sentinels and impossible values to NaN BEFORE dropping NaN rows. If you drop NaN rows first, then convert sentinels to NaN, those new NaN rows won't be dropped.
-- Correct order: (1) drop columns, (2) type conversions, (3) sentinel/impossible value → NaN, (4) replace inf/-inf with NaN, (5) drop rows with NaN in the target column.
+- Correct order: (1) drop columns, (2) type conversions, (3) sentinel/impossible value → NaN, (4) replace inf/-inf with NaN, (5) drop rows with NaN in the target column only (never drop rows for feature column NaN).
 
 CODE STYLE:
 - Always reassign: `df = df[df['age'] > 0]` not `df.drop(..., inplace=True)`
