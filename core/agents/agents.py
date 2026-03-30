@@ -90,6 +90,55 @@ def get_target_selector_llm() -> ChatOpenAI:
 
 
 ################################################################################
+# Shared Agent Helpers
+################################################################################
+
+
+def extract_structured_output(response, messages, llm, schema_class, at_limit, has_tool_calls):
+    """
+    Extract structured output from an LLM response that used bind_tools + response_format.
+
+    Handles three cases:
+      1. Tool call limit reached → force a structured-only LLM call
+      2. Parsed output available in response.additional_kwargs → use directly
+      3. Raw JSON in response.content → parse manually
+
+    Returns the parsed Pydantic model, or None if the agent still wants tools.
+    """
+    if has_tool_calls and not at_limit:
+        return None  # Agent wants more tools
+
+    if at_limit and has_tool_calls:
+        structured_only = llm.with_structured_output(schema_class, method="function_calling")
+        finalization_messages = messages + [
+            HumanMessage(content=(
+                "Tool call limit reached. Based on your investigation so far, "
+                f"provide your final {schema_class.__name__}."
+            ))
+        ]
+        return structured_only.invoke(finalization_messages)
+
+    # Normal case: parse from response
+    parsed = response.additional_kwargs.get("parsed")
+    if parsed and isinstance(parsed, schema_class):
+        return parsed
+    data = json.loads(response.content)
+    return schema_class(**data)
+
+
+def format_pass_history(pass_history, empty_label="  (none)"):
+    """Format pass history entries into human-readable lines."""
+    lines = []
+    for ph in pass_history:
+        lines.append(
+            f"  Pass {ph['pass_number']}: {ph['violations_found']} violations found, "
+            f"{ph['steps_executed']} steps executed, "
+            f"{ph['rows_after']} rows remaining"
+        )
+    return "\n".join(lines) if lines else empty_label
+
+
+################################################################################
 # Agent 1: Investigator
 #
 # INPUT:  profile (DatasetProfile) + user_query + tool access
@@ -141,14 +190,7 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
         # On subsequent passes, append re-examination context
         if pass_count > 0:
             pass_history = state.get("pass_history", [])
-            history_lines = []
-            for ph in pass_history:
-                history_lines.append(
-                    f"  Pass {ph['pass_number']}: {ph['violations_found']} violations found, "
-                    f"quality={ph.get('quality_score', 'N/A')}, {ph['steps_executed']} steps executed, "
-                    f"{ph['rows_after']} rows remaining"
-                )
-            pass_history_summary = "\n".join(history_lines) if history_lines else "  (none)"
+            pass_history_summary = format_pass_history(pass_history)
 
             # Summarize violations from previous pass so the investigator
             # doesn't re-flag issues that were already addressed.
@@ -171,6 +213,17 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
                 target_column=state.get("target_column") or "not yet confirmed",
                 previous_violations=previous_violations,
             )
+
+            # Include residual issues from the quality assessor if available
+            residual = state.get("residual_issues")
+            if residual:
+                residual_lines = "\n".join(f"  - {issue}" for issue in residual)
+                system_prompt += (
+                    f"\n\nRESIDUAL ISSUES FROM QUALITY ASSESSOR:\n"
+                    f"The quality assessor identified these specific remaining issues "
+                    f"after the last cleaning pass. Prioritize investigating and "
+                    f"addressing these:\n{residual_lines}"
+                )
 
         # Include confirmed target column if set by human-in-the-loop selection
         target_section = ""
@@ -218,31 +271,10 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
         "tool_call_count": new_tool_count,
     }
 
-    if not has_tool_calls or at_limit:
-        if at_limit and has_tool_calls:
-            # Model wanted more tools but hit the cap.
-            # Force a structured-only call (no tools) to extract findings.
-            structured_only = llm.with_structured_output(
-                InvestigationFindings, method="function_calling"
-            )
-            finalization_messages = messages + [
-                HumanMessage(content=(
-                    "Tool call limit reached. Based on your investigation so far, "
-                    "provide your final InvestigationFindings."
-                ))
-            ]
-            findings = structured_only.invoke(finalization_messages)
-        else:
-            # Normal case: response.content is already InvestigationFindings JSON.
-            # Parse it directly — no second LLM call needed.
-            parsed = response.additional_kwargs.get("parsed")
-            if parsed and isinstance(parsed, InvestigationFindings):
-                findings = parsed
-            else:
-                content = response.content
-                data = json.loads(content)
-                findings = InvestigationFindings(**data)
-    
+    findings = extract_structured_output(
+        response, messages, llm, InvestigationFindings, at_limit, has_tool_calls
+    )
+    if findings:
         log_investigation_findings(findings)
         updates["investigation_findings"] = findings
     return updates

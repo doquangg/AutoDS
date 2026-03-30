@@ -74,6 +74,8 @@ def main() -> None:
         "tool_call_count": 0,
         "pass_count": 0,
         "target_column": None,
+        "assessor_tool_call_count": 0,
+        "residual_issues": None,
     }
 
     print("=" * 70)
@@ -142,16 +144,22 @@ def main() -> None:
     pass_history = result.get("pass_history", [])
     if pass_history:
         for ph in pass_history:
-            algo = ph.get('quality_score')
-            score_str = f"quality={algo:.2f}" if algo is not None else "quality=N/A"
-            print(f"    Pass {ph['pass_number']}: {score_str}, "
+            print(f"    Pass {ph['pass_number']}: "
                   f"violations={ph['violations_found']}, "
                   f"steps={ph['steps_executed']}, "
                   f"rows_after={ph['rows_after']}")
-    profile = result.get("profile") or {}
-    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
-    score_str = f"{algo_score:.2f}" if algo_score is not None else "N/A"
-    print(f"  Final quality score : {score_str}")
+
+    # Quality assessment summary
+    qa = result.get("quality_assessment") or {}
+    structural = qa.get("structural_score")
+    llm = qa.get("llm_assessment") or {}
+    llm_score = llm.get("score") if isinstance(llm, dict) else None
+    recommendation = qa.get("recommendation", "N/A")
+    struct_str = f"{structural:.2f}" if structural is not None else "N/A"
+    llm_str = f"{llm_score:.2f}" if llm_score is not None else "N/A"
+    print(f"  Structural score    : {struct_str}")
+    print(f"  LLM quality score   : {llm_str}")
+    print(f"  Recommendation      : {recommendation}")
 
     # Clean DataFrame
     clean_df = result.get("clean_df")
