@@ -37,38 +37,43 @@ def _safe_float(x: Any) -> float | None:
 
 
 def _infer_type(series: pd.Series, s_nonnull: pd.Series | None = None) -> str:
-    """Return one of: 'Numeric', 'Categorical', 'Datetime' (as required by schema description)."""
+    """Return one of: 'Numeric', 'Categorical', 'Datetime'."""
     s = s_nonnull if s_nonnull is not None else series.dropna()
     if s.empty:
-        return "Categorical"  # default when no signal
+        return "Categorical"
 
-    # Datetime detection (works even if dtype is already datetime)
+    # If already datetime dtype
     if pd.api.types.is_datetime64_any_dtype(series):
         return "Datetime"
 
-    # Try parsing datetimes for object-like columns (cheap sample)
+    # Object/string columns: try Datetime first (cheap sample)
     if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series):
         sample = s.astype(str).head(50)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             try:
-                parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+                parsed_dt = pd.to_datetime(sample, errors="coerce", format="mixed")
             except TypeError:
-                # Older pandas fallback (no format="mixed")
-                parsed = pd.to_datetime(sample, errors="coerce")
-        if parsed.notna().mean() >= 0.8:  # mostly parseable => treat as datetime
+                parsed_dt = pd.to_datetime(sample, errors="coerce")
+        if parsed_dt.notna().mean() >= 0.6:
             return "Datetime"
 
-    # Numeric detection (including bool treated as categorical-ish)
+        # If not datetime, try Numeric coercion on the same sample
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed_num = pd.to_numeric(sample, errors="coerce")
+        if parsed_num.notna().mean() >= 0.6:
+            return "Numeric"
+
+    # Bool treated as categorical
     if pd.api.types.is_bool_dtype(series):
         return "Categorical"
+
+    # Native numeric dtype
     if pd.api.types.is_numeric_dtype(series):
         return "Numeric"
 
-    # Fallback
     return "Categorical"
-
-
 def _to_json_safe(val: Any) -> Any:
     """Convert values into JSON-safe primitives."""
     if val is None:
@@ -609,6 +614,39 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
 
         inferred_type = _infer_type(series, s_nonnull=s_nonnull)
 
+        # ------------------------------------------------------------------
+        # Issue #15: additional profiler signals (all optional / non-breaking)
+        # ------------------------------------------------------------------
+        actual_dtype = str(series.dtype)
+
+        # Strong TYPE_ERROR hint: inferred Numeric/Datetime but stored as object/string
+        type_mismatch = bool(
+            inferred_type in ("Numeric", "Datetime")
+            and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series))
+        )
+
+        # Random sample values (more representative than top-5 frequent)
+        random_sample_values = None
+        if non_null > 0:
+            try:
+                random_sample_values = [
+                    _to_json_safe(v)
+                    for v in s_nonnull.sample(n=min(5, non_null), random_state=42).tolist()
+                ]
+            except Exception:
+                random_sample_values = [_to_json_safe(v) for v in s_nonnull.head(5).tolist()]
+
+        # Coercion failures (count + sample bad values)
+        coercion_failure_count = None
+        coercion_failure_samples = None
+
+        # Percentiles for numeric columns (IQR reasoning)
+        q1 = None
+        q3 = None
+
+        # Datetime competing format samples
+        datetime_format_samples = None
+
         min_value = max_value = mean = skewness = None
 
         median = None
@@ -643,6 +681,24 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
             # Count only inf values and coercion failures, NOT natural missing data.
             # AutoGluon handles NaN natively, so natural missingness is not a defect.
             coercion_failures = int(s_num.isna().sum()) - original_nan - inf_values
+            # Issue #15: percentiles (Q1/Q3)
+            if s_num.notna().any():
+                q1 = _safe_float(s_num.quantile(0.25))
+                q3 = _safe_float(s_num.quantile(0.75))
+
+            # Issue #15: coercion failure count + samples (what bad values look like)
+            coercion_failure_count = int(coercion_failures)
+            try:
+                coerced_nonnull = pd.to_numeric(s_nonnull, errors="coerce")
+                bad_mask = coerced_nonnull.isna()
+                if bad_mask.any():
+                    coercion_failure_samples = (
+                        s_nonnull[bad_mask].astype(str).drop_duplicates().head(5).tolist()
+                    )
+                else:
+                    coercion_failure_samples = []
+            except Exception:
+                coercion_failure_samples = []
             assert coercion_failures >= 0, (
                 f"Column '{col}': negative coercion_failures={coercion_failures} "
                 f"(isna={int(s_num.isna().sum())}, original_nan={original_nan}, inf={inf_values})"
@@ -654,6 +710,38 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
 
         if inferred_type == "Datetime":
             datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
+
+            # Issue #15: show competing datetime formats (samples)
+            if non_null > 0:
+                dt_strings = s_nonnull.astype(str)
+                try:
+                    datetime_format_samples = (
+                        dt_strings.sample(n=min(5, len(dt_strings)), random_state=42)
+                        .drop_duplicates()
+                        .head(5)
+                        .tolist()
+                    )
+                except Exception:
+                    datetime_format_samples = dt_strings.drop_duplicates().head(5).tolist()
+
+                # coercion failures for datetime parsing (count + samples)
+                try:
+                    try:
+                        parsed = pd.to_datetime(dt_strings.head(200), errors="coerce", format="mixed")
+                    except TypeError:
+                        # Older pandas fallback (no format="mixed")
+                        parsed = pd.to_datetime(dt_strings.head(200), errors="coerce")
+                    bad_mask = parsed.isna()
+                    coercion_failure_count = int(bad_mask.sum())
+                    if bad_mask.any():
+                        coercion_failure_samples = (
+                            dt_strings.head(200)[bad_mask].drop_duplicates().head(5).tolist()
+                        )
+                    else:
+                        coercion_failure_samples = []
+                except Exception:
+                    coercion_failure_count = None
+                    coercion_failure_samples = None
 
         # Regex/pattern consistency for string/categorical-like columns
         if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
@@ -685,6 +773,16 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
                 regex_format_consistency=regex_format_consistency,
                 dominant_pattern=dominant_pattern,
                 ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
+
+                # Issue #15 additions (all optional)
+                actual_dtype=actual_dtype,
+                type_mismatch=type_mismatch,
+                coercion_failure_count=coercion_failure_count,
+                coercion_failure_samples=coercion_failure_samples,
+                random_sample_values=random_sample_values,
+                q1=q1,
+                q3=q3,
+                datetime_format_samples=datetime_format_samples,
                 top_frequent_values=top_vals,
                 semantic_warnings=issues,
             )
