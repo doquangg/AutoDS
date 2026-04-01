@@ -615,7 +615,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
         inferred_type = _infer_type(series, s_nonnull=s_nonnull)
 
         # ------------------------------------------------------------------
-        # Issue #15: additional profiler signals (all optional / non-breaking)
+        # Optional profiler signals (optional / non-breaking)
         # ------------------------------------------------------------------
         actual_dtype = str(series.dtype)
 
@@ -681,12 +681,12 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
             # Count only inf values and coercion failures, NOT natural missing data.
             # AutoGluon handles NaN natively, so natural missingness is not a defect.
             coercion_failures = int(s_num.isna().sum()) - original_nan - inf_values
-            # Issue #15: percentiles (Q1/Q3)
+            # Percentiles (Q1/Q3) for numeric columns
             if s_num.notna().any():
                 q1 = _safe_float(s_num.quantile(0.25))
                 q3 = _safe_float(s_num.quantile(0.75))
 
-            # Issue #15: coercion failure count + samples (what bad values look like)
+            # Coercion failures: count + sample raw values
             coercion_failure_count = int(coercion_failures)
             try:
                 coerced_nonnull = pd.to_numeric(s_nonnull, errors="coerce")
@@ -711,7 +711,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
         if inferred_type == "Datetime":
             datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
 
-            # Issue #15: show competing datetime formats (samples)
+            # Datetime: sample competing raw formats
             if non_null > 0:
                 dt_strings = s_nonnull.astype(str)
                 try:
@@ -774,7 +774,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
                 dominant_pattern=dominant_pattern,
                 ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
 
-                # Issue #15 additions (all optional)
+                # Optional profiler additions (all optional)
                 actual_dtype=actual_dtype,
                 type_mismatch=type_mismatch,
                 coercion_failure_count=coercion_failure_count,

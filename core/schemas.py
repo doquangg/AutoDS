@@ -39,7 +39,7 @@ class ColumnProfile(BaseModel):
     name: str = Field(..., description="The name of the column in the dataframe.")
     inferred_type: str = Field(..., description="The inferred data type (e.g., 'Numeric', 'Categorical', 'Datetime').")
 
-    # --- Issue #15: profiler gap fixes (Optional / Non-breaking) ---
+    # Optional profiler gap-fix fields (optional / non-breaking)
     actual_dtype: Optional[str] = Field(
         None, description="Actual pandas dtype for the column (e.g., 'object', 'int64', 'float64', 'datetime64[ns]')."
     )
