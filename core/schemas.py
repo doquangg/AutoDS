@@ -38,6 +38,28 @@ OperationType = Literal[
 class ColumnProfile(BaseModel):
     name: str = Field(..., description="The name of the column in the dataframe.")
     inferred_type: str = Field(..., description="The inferred data type (e.g., 'Numeric', 'Categorical', 'Datetime').")
+
+    # Optional profiler gap-fix fields (optional / non-breaking)
+    actual_dtype: Optional[str] = Field(
+        None, description="Actual pandas dtype for the column (e.g., 'object', 'int64', 'float64', 'datetime64[ns]')."
+    )
+    type_mismatch: Optional[bool] = Field(
+        None, description="True when inferred_type suggests Numeric/Datetime but actual_dtype is object/string-like."
+    )
+    coercion_failure_count: Optional[int] = Field(
+        None, description="For inferred Numeric/Datetime: count of values that fail coercion (excluding natural NaN)."
+    )
+    coercion_failure_samples: Optional[List[str]] = Field(
+        None, description="Sample raw values that failed coercion (3–5), to help codegen write correct cleaning logic."
+    )
+    random_sample_values: Optional[List[Any]] = Field(
+        None, description="Random sample of 3–5 values (JSON-safe) to expose edge cases beyond top frequent values."
+    )
+    q1: Optional[float] = Field(None, description="25th percentile (Q1) for numeric columns.")
+    q3: Optional[float] = Field(None, description="75th percentile (Q3) for numeric columns.")
+    datetime_format_samples: Optional[List[str]] = Field(
+        None, description="Sample competing datetime string formats when consistency is low (3–5 examples)."
+    )
     
     # Completeness & Uniqueness
     completeness: float = Field(..., description="Ratio of non-null values (0.0 to 1.0). 1.0 means no missing values.")
