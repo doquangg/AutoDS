@@ -313,12 +313,12 @@ def _ydata_profile_whitelist(df: pd.DataFrame, max_metrics_per_col: int = 20) ->
 
 def compute_anomaly_summary(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Tier 2: Compute a per-column statistical anomaly summary.
+    Compute a per-column statistical anomaly summary.
 
     For numeric columns, flags outliers using z-score (|z| > 3) and IQR methods.
     For categorical columns, flags rare categories (< 1% frequency).
 
-    Returns a dict compatible with AnomalySummary.
+    Returns a dict with keys: column_summaries, total_rows, total_anomalous_rows.
     """
     import numpy as np
 

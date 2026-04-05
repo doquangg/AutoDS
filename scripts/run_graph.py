@@ -74,8 +74,6 @@ def main() -> None:
         "tool_call_count": 0,
         "pass_count": 0,
         "target_column": None,
-        "assessor_tool_call_count": 0,
-        "residual_issues": None,
     }
 
     print("=" * 70)
@@ -148,18 +146,6 @@ def main() -> None:
                   f"violations={ph['violations_found']}, "
                   f"steps={ph['steps_executed']}, "
                   f"rows_after={ph['rows_after']}")
-
-    # Quality assessment summary
-    qa = result.get("quality_assessment") or {}
-    structural = qa.get("structural_score")
-    llm = qa.get("llm_assessment") or {}
-    llm_score = llm.get("score") if isinstance(llm, dict) else None
-    recommendation = qa.get("recommendation", "N/A")
-    struct_str = f"{structural:.2f}" if structural is not None else "N/A"
-    llm_str = f"{llm_score:.2f}" if llm_score is not None else "N/A"
-    print(f"  Structural score    : {struct_str}")
-    print(f"  LLM quality score   : {llm_str}")
-    print(f"  Recommendation      : {recommendation}")
 
     # Clean DataFrame
     clean_df = result.get("clean_df")
