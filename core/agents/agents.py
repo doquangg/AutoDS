@@ -219,17 +219,6 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
                 previous_violations=previous_violations,
             )
 
-            # Include residual issues from the quality assessor if available
-            residual = state.get("residual_issues")
-            if residual:
-                residual_lines = "\n".join(f"  - {issue}" for issue in residual)
-                system_prompt += (
-                    f"\n\nRESIDUAL ISSUES FROM QUALITY ASSESSOR:\n"
-                    f"The quality assessor identified these specific remaining issues "
-                    f"after the last cleaning pass. Prioritize investigating and "
-                    f"addressing these:\n{residual_lines}"
-                )
-
         # Include confirmed target column if set by human-in-the-loop selection
         target_section = ""
         if state.get("target_column"):
