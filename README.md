@@ -24,7 +24,15 @@ export CODEGEN_MODEL=gpt-5.4-mini         # default
 export ANSWER_MODEL=gpt-5.4-mini          # default
 export TARGET_SELECTOR_MODEL=gpt-5.4-nano # default
 ```
-4) To run the system, use one of the three commands below:
+4) (Optional) Enable web search for semantic verification:
+```
+export TAVILY_API_KEY=tvly-...
+```
+This allows the investigator to verify whether data values are semantically
+plausible by searching the web. If not set, the investigator will rely solely
+on data inspection tools.
+
+5) To run the system, use one of the three commands below:
 ```
 python scripts/run_graph.py (no change in output) # default
 AUTODS_VERBOSE=1 python scripts/run_graph.py # verbose output, with truncation

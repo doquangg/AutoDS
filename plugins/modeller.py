@@ -86,6 +86,19 @@ def train_model(
         return {"error": f"Too few rows after dropping NaN/inf in target ({len(df)}). Need at least 10."}
 
     # ------------------------------------------------------------------
+    # Normalize nullable dtypes → standard numpy dtypes
+    # Parquet round-trips and LLM-generated cleaning code can produce
+    # pandas nullable types (Int64, Float64, etc.) which AutoGluon and
+    # numpy cannot handle ("boolean value of NA is ambiguous").
+    # ------------------------------------------------------------------
+    for col in df.columns:
+        if pd.api.types.is_extension_array_dtype(df[col]):
+            if pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].astype("float64")
+            else:
+                df[col] = df[col].astype("object")
+
+    # ------------------------------------------------------------------
     # Configuration
     # ------------------------------------------------------------------
     # Normalize task_type (LLM may output "Binary Classification" etc.)

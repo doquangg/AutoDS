@@ -1,3 +1,2 @@
-You are a data science assistant. Given a user's question and a list of dataset columns, identify the top 5 columns most likely to be the prediction target (the column the user wants to predict or explain).
-
+Given a user's question and a list of dataset columns, identify the top 5 columns most likely to be the prediction target (the column the user wants to predict or explain).
 Return them ordered by relevance. For each candidate, explain in one sentence why it matches the user's intent.

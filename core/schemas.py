@@ -83,6 +83,9 @@ class ColumnProfile(BaseModel):
     datetime_format_consistency: Optional[float] = Field(
         None, description="0–1 ratio: how consistently values match the dominant datetime format."
     )
+    future_date_count: Optional[int] = Field(
+        None, description="Count of date values after today's date. Non-zero indicates likely data entry errors."
+    )
 
     # String/Categorical Signals (Optional / Non-breaking)
     regex_format_consistency: Optional[float] = Field(
@@ -321,6 +324,21 @@ class CleaningStep(BaseModel):
     operation: OperationType = Field(..., description="The category of operation being performed.")
     target_column: Optional[str] = Field(None, description="The specific column being modified (if applicable).")
 
+    @field_validator("operation", mode="before")
+    @classmethod
+    def normalize_operation(cls, v):
+        if isinstance(v, str):
+            v = v.strip().upper()
+            aliases = {
+                "DROP_COLUMNS": "DROP_COLUMN",
+                "RENAME_COLUMNS": "RENAME_COLUMN",
+                "DROP_ROW": "DROP_ROWS",
+                "CAST_TYPES": "CAST_TYPE",
+                "CUSTOM": "CUSTOM_CODE",
+            }
+            v = aliases.get(v, v)
+        return v
+
     @field_validator("target_column", mode="before")
     @classmethod
     def coerce_target_column(cls, v):
@@ -395,3 +413,7 @@ class NullCoOccurrenceInput(BaseModel):
 class CorrelationScanInput(BaseModel):
     target_column: str = Field(..., description="Column to compute correlations against.")
     top_n: int = Field(10, description="Number of top correlated columns to return.")
+
+class WebSearchInput(BaseModel):
+    query: str = Field(..., description="Search query to verify a data quality hypothesis. Be specific — include units, ranges, or domain context.")
+    domains: Optional[List[str]] = Field(None, description="Optional list of domains to restrict results to authoritative sources (e.g., ['who.int', 'mayoclinic.org'] for medical data, ['sec.gov', 'reuters.com'] for financial data).")
