@@ -86,8 +86,3 @@ class AgentState(TypedDict):
     pass_history: Annotated[List[Dict[str, Any]], operator.add]  # Compact per-pass summaries
     previous_findings: Optional[InvestigationFindings]  # Findings from prior pass, used to prevent re-flagging
 
-    # --- Quality Assessment (Three-Tier System) ---
-    quality_assessment: Optional[Dict[str, Any]]        # Full QualityAssessment from quality gate
-    assessor_messages: Annotated[List[BaseMessage], _resettable_list_reducer]  # Quality assessor agent context
-    assessor_tool_call_count: int                       # Tool call counter for quality assessor
-    residual_issues: Optional[List[str]]                # Issues from assessor → next investigator pass

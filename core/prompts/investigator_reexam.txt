@@ -18,4 +18,8 @@ Your job on this pass:
 
 Focus on identifying any remaining substantive issues that warrant another cleaning pass.
 
-REMINDER: Do NOT flag MISSING_DATA for feature (non-target) columns. AutoGluon handles missing feature data natively — it is NOT a data quality issue. Only flag MISSING_DATA if the TARGET column ({target_column}) has missing values. Feature-column missingness is never a violation.
+RE-EXAM REMINDERS:
+- Do NOT flag MISSING_DATA for feature (non-target) columns, not even bundled with the target. AutoGluon handles missing feature data natively — it is NOT a data quality issue. Only flag MISSING_DATA if the TARGET column ({target_column}) has missing values.
+- Do NOT recommend dropping rows because a feature column has NaN or invalid values. Recommend setting the cell to NaN instead. Row drops are only for target-column NaN.
+- Use OUTLIER sub-types: [IMPOSSIBLE], [TEMPORAL], [STATISTICAL]. Before flagging [IMPOSSIBLE], verify cross-column context (e.g., low height/weight may be explained by young age).
+- Consider the dataset size. If the dataset is small, note in caveats when further cleaning would reduce training data to a potentially unviable level.

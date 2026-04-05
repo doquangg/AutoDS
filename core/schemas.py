@@ -114,10 +114,9 @@ class ColumnProfile(BaseModel):
     )
 
 class AlgorithmicQualityScore(BaseModel):
-    """DEPRECATED — kept for backward compatibility during transition.
+    """DEPRECATED — retained for backward compatibility.
 
-    Use QualityAssessment instead, which combines structural checks with
-    LLM-based semantic evaluation.
+    Provides a deterministic quality score based on structural metrics.
     """
     overall: float = Field(..., description="Weighted composite score 0.0 (unusable) to 1.0 (pristine).")
     completeness: float = Field(..., description="Average completeness across all columns. Informational only — not weighted in overall score (AutoGluon handles missing features).")
@@ -136,81 +135,6 @@ class AlgorithmicQualityScore(BaseModel):
         description="Specific issues detected algorithmically (e.g., 'heaping: systolic_bp (120 in 73% of rows)')."
     )
 
-
-################################################################################
-# Quality Assessment (Three-Tier System)
-#
-# Replaces AlgorithmicQualityScore with:
-#   Tier 1: Structural checks (deterministic, free)
-#   Tier 2: Statistical anomaly summary (deterministic, cheap)
-#   Tier 3: LLM quality assessor agent (semantic, configurable cost)
-################################################################################
-
-class ColumnAnomalySummary(BaseModel):
-    """Per-column anomaly statistics from Tier 2 analysis."""
-    column: str = Field(..., description="Column name.")
-    outlier_count: int = Field(0, description="Number of statistical outliers detected.")
-    outlier_direction: str = Field(
-        "none", description="Direction of outliers: 'high', 'low', 'both', or 'none'."
-    )
-    rare_categories: Optional[List[str]] = Field(
-        None, description="Rare category values (< 1% frequency). None for numeric columns."
-    )
-
-
-class AnomalySummary(BaseModel):
-    """Tier 2 output: statistical anomaly summary across all columns."""
-    column_summaries: List[ColumnAnomalySummary] = Field(
-        default_factory=list, description="Per-column anomaly statistics."
-    )
-    total_rows: int = Field(0, description="Total rows in the dataset.")
-    total_anomalous_rows: int = Field(
-        0, description="Number of rows with at least one anomalous value."
-    )
-
-
-class LLMQualityAssessment(BaseModel):
-    """Tier 3 output: structured quality assessment from the LLM assessor agent."""
-    score: float = Field(
-        ..., description="Quality score 0.0 (unusable) to 1.0 (clean). "
-                         "Based on the LLM's semantic evaluation of the data."
-    )
-    recommendation: Literal["continue_cleaning", "stop_cleaning"] = Field(
-        ..., description="Whether the data is clean enough to proceed to modeling."
-    )
-    reasoning: str = Field(
-        ..., description="Explanation of the assessment — what the LLM checked and what it found."
-    )
-    residual_issues: List[str] = Field(
-        default_factory=list,
-        description="Specific remaining issues. Passed to the next investigator pass if continuing."
-    )
-    false_positives: List[str] = Field(
-        default_factory=list,
-        description="Anomaly flags that the LLM determined are legitimate data, not errors."
-    )
-
-
-class QualityAssessment(BaseModel):
-    """Combined quality assessment from all three tiers."""
-    structural_score: float = Field(
-        ..., description="Tier 1: deterministic structural score (0.0-1.0). "
-                         "Based on completeness and inf/nan presence."
-    )
-    anomaly_summary: AnomalySummary = Field(
-        ..., description="Tier 2: statistical anomaly summary across columns."
-    )
-    llm_assessment: Optional[LLMQualityAssessment] = Field(
-        None, description="Tier 3: LLM quality assessor's semantic evaluation. "
-                          "None if LLM assessment was skipped (e.g., structural hard blocker)."
-    )
-    recommendation: Literal["continue_cleaning", "stop_cleaning"] = Field(
-        ..., description="Final recommendation: 'continue_cleaning' or 'stop_cleaning'."
-    )
-    flags: List[str] = Field(
-        default_factory=list,
-        description="Diagnostic flags from all tiers (e.g., 'inf_nan_present: col1, col2')."
-    )
 
 
 # Schema definition for the entire dataset
