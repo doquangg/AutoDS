@@ -4,14 +4,17 @@
 # DESIGN PRINCIPLES:
 #   - Tools return SUMMARIES, never full data dumps. The agent reasons over
 #     digestible evidence, not thousands of rows.
-#   - Every tool operates on the working DataFrame stored in the module-level
+#   - Most tools operate on the working DataFrame stored in the module-level
 #     _current_df reference. This is set by the graph node before the agent
-#     runs its tool loop. 
+#     runs its tool loop.
+#   - The web_search tool is an exception — it queries external sources to
+#     verify semantic plausibility of data values.
 #   - Tools are intentionally read-only — they inspect data, never modify it.
 ################################################################################
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List
+import os
 import pandas as pd
 import numpy as np
 from langchain_core.tools import tool
@@ -23,6 +26,7 @@ from core.schemas import (
     ValueDistributionInput,
     NullCoOccurrenceInput,
     CorrelationScanInput,
+    WebSearchInput,
 )
 from core.logger import log_tool_call
 
@@ -35,11 +39,17 @@ from core.logger import log_tool_call
 # ---------------------------------------------------------------------------
 _current_df: Optional[pd.DataFrame] = None
 
+# Web search rate limiting. Reset each time set_working_df() is called
+# (i.e., at the start of each agent pass).
+_web_search_count: int = 0
+MAX_WEB_SEARCHES: int = 3
+
 
 def set_working_df(df: pd.DataFrame) -> None:
     """Called by the graph node to give tools access to the current data."""
-    global _current_df
+    global _current_df, _web_search_count
     _current_df = df
+    _web_search_count = 0
 
 
 def _get_df() -> pd.DataFrame:
@@ -287,6 +297,87 @@ def correlation_scan(target_column: str, top_n: int = 10) -> str:
     return result
 
 
+@tool("web_search", args_schema=WebSearchInput)
+def web_search(query: str, domains: Optional[List[str]] = None) -> str:
+    """
+    Search the web to verify whether a data value is semantically possible
+    in the real world. Use this to fact-check domain-specific claims —
+    e.g., "Is a body temperature of 42°C survivable?", "What is the
+    maximum plausible hospital bill in the US?", "Can a pediatric patient
+    receive a hip replacement?"
+
+    EXPENSIVE — each call has real monetary cost. Budget: 3 per pass.
+    Use ONLY for obvious semantic outliers or domain-specific facts that
+    the data alone cannot answer. Prefer data inspection tools first.
+
+    For more reliable results, specify domains — e.g.,
+    ['who.int', 'mayoclinic.org'] for medical facts.
+    """
+    global _web_search_count
+    params = {"query": query, "domains": domains}
+
+    if _web_search_count >= MAX_WEB_SEARCHES:
+        result = (
+            f"Web search budget exhausted ({MAX_WEB_SEARCHES}/{MAX_WEB_SEARCHES} "
+            f"used this pass). Proceed with data-only investigation."
+        )
+        log_tool_call("web_search", params, result)
+        return result
+
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        result = (
+            "Web search unavailable: TAVILY_API_KEY not set. "
+            "Proceed with data-only investigation."
+        )
+        log_tool_call("web_search", params, result)
+        return result
+
+    try:
+        from tavily import TavilyClient
+
+        client = TavilyClient(api_key=api_key)
+        search_kwargs = {
+            "query": query,
+            "search_depth": "basic",
+            "max_results": 3,
+        }
+        if domains:
+            search_kwargs["include_domains"] = domains
+
+        response = client.search(**search_kwargs)
+        results = response.get("results", [])
+    except Exception as e:
+        result = f"Web search failed: {e}"
+        log_tool_call("web_search", params, result)
+        return result
+
+    _web_search_count += 1
+
+    if not results:
+        result = f"No results found for: '{query}'"
+        log_tool_call("web_search", params, result)
+        return result
+
+    lines = [
+        f"Found {len(results)} result(s) for: '{query}' "
+        f"[{_web_search_count}/{MAX_WEB_SEARCHES} searches used]"
+    ]
+    for r in results:
+        title = r.get("title", "No title")
+        url = r.get("url", "")
+        content = r.get("content", "")
+        # Truncate content to keep token count manageable
+        if len(content) > 300:
+            content = content[:300] + "..."
+        lines.append(f"\n  [{title}]({url})")
+        lines.append(f"  {content}")
+
+    result = "\n".join(lines)
+    log_tool_call("web_search", params, result)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Export list — this is what gets passed to ToolNode and bind_tools()
 # ---------------------------------------------------------------------------
@@ -297,4 +388,5 @@ investigation_tools = [
     value_distribution,
     null_co_occurrence,
     correlation_scan,
+    web_search,
 ]

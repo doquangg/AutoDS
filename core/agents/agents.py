@@ -29,8 +29,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict
+
+from pydantic import ValidationError
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
@@ -185,7 +189,8 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
         profile_json = json.dumps(state["profile"], indent=2, default=str)
         pass_count = state.get("pass_count", 0)
 
-        system_prompt = INVESTIGATOR_SYSTEM_PROMPT
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        system_prompt = f"Current date and time: {now_utc}\n\n{INVESTIGATOR_SYSTEM_PROMPT}"
 
         # On subsequent passes, append re-examination context
         if pass_count > 0:
@@ -354,7 +359,21 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
         user_message_snippet=messages[1].content if len(messages) > 1 else "",
     )
 
-    recipe = structured_llm.invoke(messages)
+    logger = logging.getLogger("autods")
+    try:
+        recipe = structured_llm.invoke(messages)
+    except ValidationError as exc:
+        logger.warning(
+            "codegen validation error (will retry once): %s", exc
+        )
+        messages.append(AIMessage(content="[invalid response]"))
+        messages.append(HumanMessage(content=(
+            f"Your previous response failed schema validation:\n{exc}\n\n"
+            f"Return a corrected CleaningRecipe with valid operation types. "
+            f"Valid operations are: DROP_COLUMN, DROP_ROWS, RENAME_COLUMN, CAST_TYPE, CUSTOM_CODE."
+        )))
+        recipe = structured_llm.invoke(messages)
+
     log_cleaning_recipe(recipe)
 
     return {

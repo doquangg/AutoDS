@@ -17,3 +17,5 @@ Your job on this pass:
 5. Do NOT re-flag issues that have already been successfully addressed
 
 Focus on identifying any remaining substantive issues that warrant another cleaning pass.
+
+REMINDER: Do NOT flag MISSING_DATA for feature (non-target) columns. AutoGluon handles missing feature data natively — it is NOT a data quality issue. Only flag MISSING_DATA if the TARGET column ({target_column}) has missing values. Feature-column missingness is never a violation.

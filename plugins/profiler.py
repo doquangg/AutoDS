@@ -113,12 +113,25 @@ def _top_frequent_values(series: pd.Series, k: int = 5, s_nonnull: pd.Series | N
 
 
 # issues = local name (avoid shadowing stdlib warnings); schema field stays semantic_warnings for API stability
+def _count_future_dates(s_nonnull: pd.Series) -> int:
+    """Count datetime values after today. Returns 0 on any error."""
+    if len(s_nonnull) == 0:
+        return 0
+    try:
+        dt_vals = pd.to_datetime(s_nonnull, errors="coerce").dropna()
+        today = pd.Timestamp.now().normalize()
+        return int((dt_vals > today).sum())
+    except Exception:
+        return 0
+
+
 def _semantic_warnings(
     series: pd.Series,
     inferred_type: str,
     unique_factor: float,
     s_nonnull: pd.Series | None = None,
     s_num_clean: pd.Series | None = None,
+    future_date_count: int | None = None,
 ) -> List[str]:
     issues: List[str] = []
     if s_nonnull is None:
@@ -156,6 +169,13 @@ def _semantic_warnings(
         sample = s_nonnull.astype(str).head(200)
         if (sample.str.strip() != sample).any():
             issues.append("Leading/Trailing Whitespace")
+
+    # Datetime: future date detection
+    if inferred_type == "Datetime" and len(s_nonnull) > 0:
+        if future_date_count is None:
+            future_date_count = _count_future_dates(s_nonnull)
+        if future_date_count > 0:
+            issues.append(f"Future Dates Detected: {future_date_count} values after {pd.Timestamp.now().normalize().date().isoformat()}")
 
     return issues
 
@@ -303,8 +323,10 @@ def compute_anomaly_summary(df: pd.DataFrame) -> Dict[str, Any]:
     import numpy as np
 
     column_summaries: List[Dict[str, Any]] = []
-    # Track anomalous rows efficiently with a boolean array
-    anomaly_flags = np.zeros(len(df), dtype=bool)
+    # Track anomalous rows efficiently with a boolean array.
+    # Use the DataFrame's own index so label-based indexing works correctly
+    # even when the index is non-contiguous after row drops.
+    anomaly_flags = pd.Series(False, index=df.index)
 
     for col in df.columns:
         series = df[col]
@@ -708,8 +730,10 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
 
         top_vals = _top_frequent_values(series, k=5, s_nonnull=s_nonnull)
 
+        future_date_count = None
         if inferred_type == "Datetime":
             datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
+            future_date_count = _count_future_dates(s_nonnull)
 
             # Datetime: sample competing raw formats
             if non_null > 0:
@@ -746,7 +770,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
         # Regex/pattern consistency for string/categorical-like columns
         if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
             regex_format_consistency, dominant_pattern = _regex_consistency(series)
-        issues = _semantic_warnings(series, inferred_type, unique_factor, s_nonnull=s_nonnull, s_num_clean=s_num_clean)
+        issues = _semantic_warnings(series, inferred_type, unique_factor, s_nonnull=s_nonnull, s_num_clean=s_num_clean, future_date_count=future_date_count)
         if detailed_profiler:
             if ydata_error:
                 issues.append("ydata_fallback_to_baseline")
@@ -770,6 +794,7 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
                 earliest_date=earliest_date,
                 latest_date=latest_date,
                 datetime_format_consistency=datetime_format_consistency,
+                future_date_count=future_date_count,
                 regex_format_consistency=regex_format_consistency,
                 dominant_pattern=dominant_pattern,
                 ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,

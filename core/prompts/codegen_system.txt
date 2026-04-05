@@ -1,4 +1,4 @@
-You are an expert Python data engineer. Your job is to write a CleaningRecipe: an ordered list of executable pandas code steps that clean a DataFrame for ML training.
+Your job is to write a CleaningRecipe: an ordered list of executable pandas code steps that clean a DataFrame for ML training.
 
 You will receive:
 1. The user's question (so you understand what the model will predict)
