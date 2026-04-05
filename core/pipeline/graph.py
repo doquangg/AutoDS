@@ -79,9 +79,9 @@ from plugins.modeller import train_model
 ################################################################################
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-MAX_TOOL_CALLS = 15   # Cap on investigation tool calls to prevent runaway loops
+MAX_TOOL_CALLS = 20   # Cap on investigation tool calls to prevent runaway loops
 MAX_RETRIES = 3       # Max code generation retries on sandbox failure
-MAX_PASSES = 3        # Max cleaning passes before forcing move to modeling
+MAX_PASSES = 5        # Max cleaning passes before forcing move to modeling
 
 
 ################################################################################
