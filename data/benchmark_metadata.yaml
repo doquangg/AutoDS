@@ -1,0 +1,31 @@
+# Literature baselines are CONTEXT, not a pass/fail gate. They use different
+# splits, sometimes different problem definitions, and different model budgets.
+# Treat them as "are we in the right zip code" not "did we beat the paper."
+datasets:
+  - name: ai4i_2020
+    file: AI4I.parquet
+    target_column: "Machine failure"
+    task_type: binary_classification
+    metric: roc_auc
+    literature_baseline: 0.97
+    literature_source: "Matzka 2020 (UCI #601). NOTE: paper baseline likely includes the per-mode failure flags as features, which we drop. A fair AutoDS score will be lower than 0.97."
+    user_query: "Which machines are likely to fail?"
+    drop_columns: ["TWF", "HDF", "PWF", "OSF", "RNF"]  # leakage: sub-causes of the target
+
+  - name: diabetes_readmission
+    file: diabetes_readmission.parquet
+    target_column: "readmitted"
+    task_type: multiclass_classification
+    metric: macro_f1  # NOT accuracy - majority class is ~54%, accuracy is uninformative
+    literature_baseline: 0.40  # rough macro-F1 ballpark; Strack et al. reported accuracy
+    literature_source: "Strack et al. 2014, BioMed Research International (reported accuracy ~0.57)"
+    user_query: "Which patients are likely to be readmitted?"
+
+  - name: taiwan_credit_default
+    file: taiwan_credit_default.parquet
+    target_column: "Y"
+    task_type: binary_classification
+    metric: roc_auc
+    literature_baseline: 0.77
+    literature_source: "Yeh & Lien 2009, Expert Systems with Applications"
+    user_query: "Which credit card customers will default next month?"
