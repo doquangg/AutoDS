@@ -308,6 +308,53 @@ class CleaningLogEntry(BaseModel):
 
 
 ################################################################################
+# Schema Definitions for Feature Engineering:
+# These schemas define the structure for post-cleaning feature engineering plans
+# and their execution audit trail.
+################################################################################
+
+FeatureOperationType = Literal[
+    "CREATE_FEATURE",     # add a new derived column
+    "TRANSFORM_FEATURE",  # modify/transform an existing feature
+    "DROP_FEATURE",       # remove a feature deemed harmful/redundant
+]
+
+class FeatureEngineeringStep(BaseModel):
+    step_id: int = Field(..., description="Execution order (1-indexed).")
+    operation: FeatureOperationType = Field(..., description="Type of feature engineering operation.")
+    input_columns: List[str] = Field(
+        default_factory=list,
+        description="Columns used to create/transform this feature."
+    )
+    output_column: Optional[str] = Field(
+        None,
+        description="Name of the engineered feature (if applicable)."
+    )
+    rationale: str = Field(
+        ...,
+        description="Why this feature helps (semantic reasoning, must avoid leakage)."
+    )
+    python_code: str = Field(
+        ...,
+        description="Executable Python snippet using 'df' to apply the feature change."
+    )
+
+class FeatureEngineeringRecipe(BaseModel):
+    steps: List[FeatureEngineeringStep] = Field(
+        default_factory=list,
+        description="Ordered feature engineering plan."
+    )
+
+class FeatureEngineeringLogEntry(BaseModel):
+    timestamp: str = Field(..., description="ISO 8601 timestamp of when the step was executed.")
+    step_id: int = Field(..., description="The step_id from the feature engineering plan.")
+    operation: str = Field(..., description="Operation performed.")
+    output_column: Optional[str] = Field(None, description="Engineered feature name (if any).")
+    code_executed: str = Field(..., description="The actual Python code that was run.")
+    status: Literal["SUCCESS", "FAILED"] = Field(..., description="Whether execution succeeded or failed.")
+
+
+################################################################################
 # Schema Definitions for Tools:
 # Input schemas for investigation tools. Each tool function uses one of these
 # as its args_schema so LangChain can generate the correct tool-call JSON.

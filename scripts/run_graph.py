@@ -70,10 +70,17 @@ def main() -> None:
     initial_state = {
         "user_query": USER_QUERY,
         "working_df": df,
+
+        # Cleaning loop controls
         "retry_count": 0,
         "tool_call_count": 0,
         "pass_count": 0,
         "target_column": None,
+
+        # Feature Engineering (post-cleaning)
+        "fe_round": 0,
+        "fe_history": [],
+        "engineered_df": None,
     }
 
     print("=" * 70)
