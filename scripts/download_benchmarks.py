@@ -17,8 +17,8 @@ def save_dataset(ds, path):
 # Diabetes 130-US Hospitals (UCI #296)
 save_dataset(fetch_ucirepo(id=296), "data/benchmark_data/diabetes_readmission.parquet")
 
-# SECOM (UCI #601)
-save_dataset(fetch_ucirepo(id=601), "data/benchmark_data/secom.parquet")
+# AI4I 2020 (UCI #601)
+save_dataset(fetch_ucirepo(id=601), "data/benchmark_data/AI4I.parquet")
 
 # Taiwan Credit Card Default (UCI #350)
 save_dataset(fetch_ucirepo(id=350), "data/benchmark_data/taiwan_credit_default.parquet")
