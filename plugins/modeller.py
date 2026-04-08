@@ -147,6 +147,26 @@ def train_model(
     # ------------------------------------------------------------------
     # Extract results
     # ------------------------------------------------------------------
+    metadata = build_model_metadata(predictor, df, elapsed, save_path)
+    log_model_metadata(metadata)
+    return metadata
+
+
+def build_model_metadata(
+    predictor: TabularPredictor,
+    df: pd.DataFrame,
+    elapsed: float,
+    save_path: str,
+) -> Dict[str, Any]:
+    """
+    Assemble the metadata dict consumed by the answer agent from a trained
+    TabularPredictor.
+
+    Extracted so callers outside the graph path (e.g. the benchmark harness)
+    can reuse the exact shape the answer agent expects. ``df`` is the training
+    DataFrame; used for the feature-importance sample and for
+    ``num_rows_trained`` / ``num_features``.
+    """
     leaderboard = predictor.leaderboard(silent=True)
 
     # Use AutoGluon's internal validation scores (from the leaderboard) instead
@@ -166,8 +186,8 @@ def train_model(
     except Exception:
         feat_dict = {}
 
-    metadata: Dict[str, Any] = {
-        "target_column": target_column,
+    return {
+        "target_column": predictor.label,
         "problem_type": predictor.problem_type,
         "eval_metrics": eval_metrics,
         "best_model": predictor.model_best,
@@ -178,6 +198,3 @@ def train_model(
         "num_rows_trained": len(df),
         "num_features": len(df.columns) - 1,
     }
-
-    log_model_metadata(metadata)
-    return metadata

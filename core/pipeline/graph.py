@@ -190,6 +190,13 @@ def node_sandbox(state: AgentState):
         updates["latest_error"] = None
         updates["retry_count"] = 0
 
+        # Record the steps that were actually committed to working_df so the
+        # full multi-pass cleaning can be replayed end-to-end on held-out
+        # folds. Only done on success — failed attempts are rolled back
+        # (working_df is untouched) and must not contribute here. The state
+        # reducer is operator.add, so each successful pass appends its steps.
+        updates["applied_steps"] = list(state["current_plan"].steps)
+
         # Multi-pass tracking
         findings = state.get("investigation_findings")
         pass_summary = {
