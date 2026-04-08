@@ -215,5 +215,8 @@ output/
 # Outputs from OrchEval
 orcheval_outputs/
 
+# Outputs from data downloading
+data/benchmark_data/
+
 # Other stuff we don't need
 .vscode
