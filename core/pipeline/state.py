@@ -86,9 +86,3 @@ class AgentState(TypedDict):
     pass_history: Annotated[List[Dict[str, Any]], operator.add]  # Compact per-pass summaries
     previous_findings: Optional[InvestigationFindings]  # Findings from prior pass, used to prevent re-flagging
 
-    # --- Feature Engineering (post-cleaning) ---
-    fe_round: int
-    fe_history: Annotated[List[Dict[str, Any]], operator.add]
-    engineered_df: Optional[pd.DataFrame]
-
-

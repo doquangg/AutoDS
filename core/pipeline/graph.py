@@ -72,7 +72,6 @@ from core.runtime.tools import investigation_tools, set_working_df
 from core.logger import log_node, log_routing, log_profile_summary
 from plugins.profiler import generate_profile
 from plugins.modeller import train_model
-from plugins.feature_engineering import engineer_features
 
 
 ################################################################################
@@ -254,47 +253,6 @@ def node_pass_reset(state: AgentState):
         "current_plan": None,
     }
 
-
-def node_feature_engineering(state: AgentState):
-    """
-    Feature engineering stage (post-cleaning, pre-modeling).
-
-    Deterministic + bounded:
-    - Uses plugins.feature_engineering.engineer_features
-    - Capped by MAX_FE_ROUNDS (default 3)
-    - Tracks fe_round + fe_history in state
-    """
-    print("--- [5] Feature Engineering ---")
-
-    MAX_FE_ROUNDS = 3  # default cap; can be made configurable later
-    fe_round = state.get("fe_round", 0)
-
-    if fe_round >= MAX_FE_ROUNDS:
-        print(f">>> FE: max rounds ({MAX_FE_ROUNDS}) reached. Skipping FE.")
-        return {"engineered_df": (state.get("clean_df") or state.get("working_df")), "clean_df": (state.get("clean_df") or state.get("working_df")), "fe_round": fe_round}
-
-    df_in = state.get("clean_df") or state.get("working_df")
-    target_col = state.get("target_column")
-
-    result = engineer_features(df_in, target_column=target_col, round_id=fe_round)
-
-    history_entry = {
-        "round": fe_round,
-        "new_features": result.new_features,
-        "dropped_features": result.dropped_features,
-        "notes": result.notes,
-    }
-
-    print(f">>> FE round {fe_round}: added {len(result.new_features)} features")
-
-    return {
-        "engineered_df": result.df,
-        "clean_df": result.df,   # downstream (AutoGluon) continues using clean_df
-        "fe_round": fe_round + 1,
-        "fe_history": [history_entry],
-    }
-
-
 def node_autogluon(state: AgentState):
     """Trains an ML model using AutoGluon on the cleaned data."""
     print("--- [5] AutoGluon Modeling ---")
@@ -474,7 +432,6 @@ workflow.add_node("code_generator",      node_code_generator)
 workflow.add_node("sandbox",             node_sandbox)
 workflow.add_node("re_profile",          node_re_profile)
 workflow.add_node("pass_reset",          node_pass_reset)
-workflow.add_node("feature_engineering", node_feature_engineering)
 workflow.add_node("autogluon",           node_autogluon)
 workflow.add_node("answer_agent",        node_answer)
 
@@ -514,15 +471,13 @@ workflow.add_conditional_edges(
     "re_profile",
     route_post_clean,
     {
-        "done": "feature_engineering",   # No critical violations or max passes
+        "done": "autogluon",             # No critical violations or max passes
         "next_pass": "pass_reset",       # Critical violations remain
     }
 )
 
 # Pass reset → profiler (loop back)
 workflow.add_edge("pass_reset", "profiler")
-
-workflow.add_edge("feature_engineering", "autogluon")
 
 # Linear flow: autogluon → answer → END
 workflow.add_edge("autogluon", "answer_agent")
