@@ -301,6 +301,8 @@ def run_one(ds: Dict[str, Any]) -> Dict[str, Any]:
         "model_path": str(final_model_dir),
         "final_answer": None,
         "error": None,
+        "fe_rounds": 0,
+        "fe_features_added": 0,
     }
 
     # Snapshot AUTOGLUON_TIME_LIMIT so we can both override it for the graph's
@@ -423,10 +425,26 @@ def run_one(ds: Dict[str, Any]) -> Dict[str, Any]:
             result_row["error"] = str(e)
             return result_row
 
+        # 10b. Replay the feature engineering steps on the val and test folds.
+        applied_fe_steps = graph_result.get("applied_fe_steps") or []
+        result_row["fe_rounds"] = len(graph_result.get("fe_history") or [])
+        result_row["fe_features_added"] = len(applied_fe_steps)
+        if applied_fe_steps:
+            try:
+                val_clean = replay_steps(applied_fe_steps, val_clean, target_col)
+                test_clean = replay_steps(applied_fe_steps, test_clean, target_col)
+            except RecipeReplayError as e:
+                print(f"[{name}] FE recipe replay FAILED: {e}")
+                result_row["status"] = "fe_replay_failed"
+                result_row["error"] = str(e)
+                return result_row
+
         result_row["n_test_after_replay"] = len(test_clean)
         print(
             f"[{name}] After replay: {len(val_clean)} val / "
-            f"{len(test_clean)} test"
+            f"{len(test_clean)} test "
+            f"(FE rounds={result_row['fe_rounds']}, "
+            f"features added={result_row['fe_features_added']})"
         )
 
         # Sanity: cleaned val/test must have the same columns as clean_train.

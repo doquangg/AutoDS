@@ -1,13 +1,14 @@
 ################################################################################
-# Subprocess-based sandbox for executing LLM-generated cleaning code.
+# Subprocess-based sandbox for executing LLM-generated step code (cleaning or
+# feature engineering).
 #
-# Runs each CleaningStep's python_code in an isolated child process so that:
+# Runs each step's python_code in an isolated child process so that:
 #   - Crashes in generated code don't take down the main process
 #   - A timeout prevents infinite loops
 #   - Per-step success/failure is logged for auditability
 #
 # FLOW:
-#   Parent: serialize df → parquet, write cleaning script → temp dir
+#   Parent: serialize df → parquet, write child script → temp dir
 #   Child:  read parquet, exec each step in order, write output + log.json
 #   Parent: read output parquet + log.json, return results
 ################################################################################
@@ -25,30 +26,34 @@ from typing import Optional
 
 import pandas as pd
 
-from core.schemas import CleaningRecipe, CleaningStep, CleaningLogEntry
+from core.schemas import CleaningLogEntry
 
 
 # Maximum wall-clock time (seconds) for the child process
 SANDBOX_TIMEOUT = 120
 
 
-def execute_cleaning_plan(
+def execute_plan_in_sandbox(
     df: pd.DataFrame,
-    plan: CleaningRecipe,
+    plan,
 ) -> tuple[pd.DataFrame, list[CleaningLogEntry], Optional[str]]:
     """
-    Execute a CleaningRecipe in an isolated subprocess.
+    Execute a plan's steps in an isolated subprocess. Accepts any plan whose
+    ``.steps`` are pydantic models exposing ``step_id``, ``operation``,
+    ``justification`` and ``python_code`` via ``model_dump()`` — e.g.
+    ``CleaningRecipe`` or ``FeatureRecipe``.
 
-    Args:
-        df: The input DataFrame to clean.
-        plan: A CleaningRecipe containing ordered CleaningSteps.
+    Subprocess isolation is required because ``python_code`` is LLM-generated.
+    In-process replay (e.g. ``scripts/evaluate_benchmarks.py:replay_steps``)
+    is only safe for steps that were already vetted by a prior sandbox run.
 
     Returns:
-        (clean_df, log_entries, error)
-        - clean_df: The cleaned DataFrame (original df if execution failed).
+        (out_df, log_entries, error)
+        - out_df: The transformed DataFrame (original df if execution failed).
         - log_entries: Per-step audit trail.
         - error: None on success, or an error message string on failure.
     """
+    steps_data = [step.model_dump() for step in plan.steps]
     with tempfile.TemporaryDirectory(prefix="autods_sandbox_") as tmpdir:
         input_path = os.path.join(tmpdir, "input.parquet")
         output_path = os.path.join(tmpdir, "output.parquet")
@@ -59,10 +64,8 @@ def execute_cleaning_plan(
         # --- Serialize inputs ---
         df.to_parquet(input_path)
 
-        # Write steps as JSON so the child can read metadata for logging
-        steps_data = [step.model_dump() for step in plan.steps]
         with open(steps_path, "w") as f:
-            json.dump(steps_data, f)
+            json.dump(steps_data, f, default=str)
 
         # --- Generate the child script ---
         script = _build_child_script(input_path, output_path, log_path, steps_path)
@@ -89,12 +92,12 @@ def execute_cleaning_plan(
             error_msg = result.stderr.strip() or f"Child process exited with code {result.returncode}"
             return df, logs, error_msg
 
-        # --- Read cleaned DataFrame ---
+        # --- Read transformed DataFrame ---
         if not os.path.exists(output_path):
             return df, logs, "Child process succeeded but output file was not written"
 
-        clean_df = pd.read_parquet(output_path)
-        return clean_df, logs, None
+        out_df = pd.read_parquet(output_path)
+        return out_df, logs, None
 
 
 def _build_child_script(

@@ -5,7 +5,7 @@
 #   START → profiler → target_selector → investigator ⟲ tools →
 #           code_generator → sandbox → [error?] → retry/fail
 #                                     → [success] → re_profile → route_post_clean
-#                                                    → [done] → autogluon → answer → END
+#                                                    → [done] → feature_engineering → autogluon → answer → END
 #                                                    → [next_pass] → pass_reset → profiler …
 #
 # KEY DESIGN DECISIONS:
@@ -17,8 +17,12 @@
 #      Investigation findings are preserved within a pass.
 #   4. Termination: after each successful sandbox execution, the pipeline
 #      re-profiles the data. If the investigator found no CRITICAL violations
-#      (or MAX_PASSES is reached), we move to modeling. No LLM is involved
-#      in the termination decision.
+#      (or MAX_PASSES is reached), we move to feature engineering. No LLM is
+#      involved in the termination decision.
+#   5. Feature engineering runs once after cleaning completes. It is a single
+#      LangGraph node that internally loops through up to MAX_FE_ROUNDS rounds
+#      (planner → codegen → sandbox → re-profile). See
+#      core/agents/feature_engineering.py for details.
 #
 # GRAPH VISUALIZATION:
 #
@@ -43,7 +47,10 @@
 #     ▼                                     │
 #   re_profile                              │
 #     │                                     │
-#     ├─[done]──► autogluon                 │
+#     ├─[done]──► feature_engineering       │
+#     │              │                      │
+#     │              ▼                      │
+#     │           autogluon                 │
 #     │              │                      │
 #     │           answer_agent              │
 #     │              │                      │
@@ -66,8 +73,9 @@ from langchain_core.messages import AIMessage
 # Local Imports
 from core.pipeline.state import AgentState
 from core.agents.agents import run_investigator_agent, run_codegen_agent, run_answer_agent
+from core.agents.feature_engineering import node_feature_engineering
 from core.agents.target_selector import select_target_column
-from core.runtime.sandbox import execute_cleaning_plan
+from core.runtime.sandbox import execute_plan_in_sandbox
 from core.runtime.tools import investigation_tools, set_working_df
 from core.logger import log_node, log_routing, log_profile_summary
 from plugins.profiler import generate_profile
@@ -162,7 +170,7 @@ def node_sandbox(state: AgentState):
     for multi-pass context.
     """
     print("--- [4] Sandbox Execution ---")
-    new_df, new_logs, error = execute_cleaning_plan(
+    new_df, new_logs, error = execute_plan_in_sandbox(
         state["working_df"],
         state["current_plan"]
     )
@@ -424,7 +432,7 @@ def route_post_clean(state: AgentState):
 #   START → profiler → target_selector → investigator ⟲ tools →
 #           code_generator → sandbox → [error?] → retry/fail
 #                                     → [success] → re_profile
-#                                                    → [done] → autogluon → answer → END
+#                                                    → [done] → feature_engineering → autogluon → answer → END
 #                                                    → [next_pass] → pass_reset → profiler …
 ################################################################################
 
@@ -439,6 +447,7 @@ workflow.add_node("code_generator",      node_code_generator)
 workflow.add_node("sandbox",             node_sandbox)
 workflow.add_node("re_profile",          node_re_profile)
 workflow.add_node("pass_reset",          node_pass_reset)
+workflow.add_node("feature_engineering", node_feature_engineering)
 workflow.add_node("autogluon",           node_autogluon)
 workflow.add_node("answer_agent",        node_answer)
 
@@ -478,7 +487,7 @@ workflow.add_conditional_edges(
     "re_profile",
     route_post_clean,
     {
-        "done": "autogluon",             # No critical violations or max passes
+        "done": "feature_engineering",   # Cleaning complete — run FE before modeling
         "next_pass": "pass_reset",       # Critical violations remain
     }
 )
@@ -486,7 +495,8 @@ workflow.add_conditional_edges(
 # Pass reset → profiler (loop back)
 workflow.add_edge("pass_reset", "profiler")
 
-# Linear flow: autogluon → answer → END
+# Linear flow: feature_engineering → autogluon → answer → END
+workflow.add_edge("feature_engineering", "autogluon")
 workflow.add_edge("autogluon", "answer_agent")
 workflow.add_edge("answer_agent", END)
 
