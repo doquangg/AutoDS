@@ -26,6 +26,7 @@ from core.schemas import (
     DatasetProfile,
     InvestigationFindings,
     CleaningRecipe,
+    CleaningStep,
     CleaningLogEntry,
 )
 
@@ -68,6 +69,14 @@ class AgentState(TypedDict):
     profile: Optional[DatasetProfile]
     investigation_findings: Optional[InvestigationFindings]
     current_plan: Optional[CleaningRecipe]
+
+    # Accumulating flat list of every CleaningStep that was successfully
+    # executed by the sandbox, across all passes. Unlike current_plan (which
+    # holds only the current pass's recipe and is reset between passes), this
+    # field persists across passes via the operator.add reducer. Consumers
+    # that need to replay the graph's full cleaning on a held-out fold (e.g.
+    # scripts/evaluate_benchmarks.py) MUST use this field, not current_plan.
+    applied_steps: Annotated[List[CleaningStep], operator.add]
 
     # --- Audit Trail ---
     cleaning_history: Annotated[List[CleaningLogEntry], operator.add]
