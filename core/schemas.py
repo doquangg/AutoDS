@@ -308,6 +308,82 @@ class CleaningLogEntry(BaseModel):
 
 
 ################################################################################
+# Schema Definitions for Feature Engineering:
+# These schemas define the data contracts between the FE planner, FE codegen,
+# and the sandbox. They intentionally parallel (rather than extend) the
+# cleaning schemas so cleaning and feature engineering stay independent.
+################################################################################
+
+FeatureOperationType = Literal[
+    "NUMERIC_TRANSFORM",   # log/sqrt/power/reciprocal of a single numeric column
+    "INTERACTION",         # ratio/diff/product/sum across two or more columns
+    "BINNING",             # discretize a numeric column into buckets
+    "DATETIME_EXPAND",     # year/month/day/dow/hour/is_weekend from a datetime column
+    "CATEGORY_ENCODE",     # frequency / hash encoding (NEVER target encoding)
+    "AGGREGATION",         # within-row aggregate across a set of columns
+    "TEXT_FEATURE",        # length, token count, regex match flag
+    "CUSTOM_FEATURE",      # escape hatch; must still respect leakage rules
+]
+
+
+class FeatureIdea(BaseModel):
+    """A candidate feature proposed by the FE planner (pre-code)."""
+    idea_id: int = Field(..., description="1-indexed within the round.")
+    name: str = Field(..., description="Snake_case name of the NEW column to create.")
+    operation: FeatureOperationType = Field(..., description="Category of feature operation.")
+    source_columns: List[str] = Field(
+        ...,
+        description="Columns that will be READ to build this feature. MUST NOT contain the target column."
+    )
+    rationale: str = Field(..., description="Why this feature is likely to help the model answer the user query.")
+    expected_dtype: Literal["float", "int", "category", "bool", "datetime"] = Field(
+        ..., description="Advisory expected dtype of the new column."
+    )
+
+
+class FeatureProposal(BaseModel):
+    """Structured output of the FE planner agent for one round."""
+    round_number: int = Field(..., description="1-indexed round within the FE stage.")
+    ideas: List[FeatureIdea] = Field(
+        default_factory=list,
+        description="Candidate features for this round. Empty list signals nothing to add."
+    )
+    no_more_features: bool = Field(
+        False,
+        description="If True, the FE stage should terminate after this round (even if ideas is non-empty)."
+    )
+    reasoning: str = Field(
+        ..., description="Short summary of how these ideas follow from the profile + user query."
+    )
+
+
+class FeatureStep(BaseModel):
+    """One executable FE step. Parallels CleaningStep but narrower in scope."""
+    step_id: int = Field(..., description="Execution order within the round (1-indexed).")
+    idea_id: int = Field(..., description="Links back to FeatureIdea.idea_id in the current round's proposal.")
+    round_number: int = Field(..., description="1-indexed round that produced this step.")
+    new_column: str = Field(..., description="Name of the new column this step creates.")
+    operation: FeatureOperationType = Field(..., description="Category of feature operation.")
+    source_columns: List[str] = Field(
+        ..., description="Columns read by this step. MUST NOT contain the target column."
+    )
+    justification: str = Field(..., description="Semantic reasoning: why this feature, why this code.")
+    python_code: str = Field(
+        ...,
+        description="Executable Python using `df`, `pd`, `np`. MUST add exactly one new column "
+                    "named `new_column`. MUST NOT reference the target column on the RHS."
+    )
+
+
+class FeatureRecipe(BaseModel):
+    """The full FE plan for one round, returned by the FE codegen agent."""
+    round_number: int = Field(..., description="1-indexed round that produced this recipe.")
+    steps: List[FeatureStep] = Field(
+        default_factory=list, description="Ordered list of feature steps to execute."
+    )
+
+
+################################################################################
 # Schema Definitions for Tools:
 # Input schemas for investigation tools. Each tool function uses one of these
 # as its args_schema so LangChain can generate the correct tool-call JSON.

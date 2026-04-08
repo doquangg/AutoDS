@@ -28,6 +28,7 @@ from core.schemas import (
     CleaningRecipe,
     CleaningStep,
     CleaningLogEntry,
+    FeatureStep,
 )
 
 
@@ -95,3 +96,14 @@ class AgentState(TypedDict):
     pass_history: Annotated[List[Dict[str, Any]], operator.add]  # Compact per-pass summaries
     previous_findings: Optional[InvestigationFindings]  # Findings from prior pass, used to prevent re-flagging
 
+    # --- Feature Engineering ---
+    # Flat list of every FeatureStep successfully executed across all FE rounds.
+    # Replayed on held-out folds so benchmark scoring sees the same features as
+    # the graph's training data.
+    applied_fe_steps: Annotated[List[FeatureStep], operator.add]
+
+    # Per-round summary (round_number, ideas_proposed, steps_executed, columns_after)
+    fe_history: Annotated[List[Dict[str, Any]], operator.add]
+
+    # Audit trail of FE sandbox executions.
+    fe_log: Annotated[List[CleaningLogEntry], operator.add]
