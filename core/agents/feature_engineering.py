@@ -32,7 +32,7 @@ from core.runtime.tools import investigation_tools, set_working_df, set_working_
 from core.runtime.sandbox import execute_plan_in_sandbox
 from core.prompts import FE_PLANNER_SYSTEM_PROMPT, FE_CODEGEN_SYSTEM_PROMPT
 from core.logger import log_node, log_llm_request, log_llm_response
-from plugins.profiler import generate_profile
+from plugins.profiler import extend_profile, generate_profile
 from plugins.profile_views import profile_to_llm_json, ProfileViewName
 
 
@@ -521,14 +521,35 @@ def node_feature_engineering(state: AgentState) -> Dict[str, Any]:
         # Re-profile so the next round's planner sees the new columns.
         # Skip on the final round since no further planner call will consume it.
         if round_num < MAX_FE_ROUNDS:
+            # FE rounds are strictly additive: every step in recipe.steps creates
+            # a new column named after its FeatureIdea, and the leakage lint plus
+            # codegen prompts forbid mutating existing columns. We can therefore
+            # extend the existing profile with just the newly-added columns
+            # instead of regenerating the whole thing. Falls back to a full
+            # generate_profile if anything looks off.
+            added_cols = [s.new_column for s in recipe.steps]
             try:
-                profile = generate_profile(df, detailed_profiler=False, target_column=target_col)
+                profile = extend_profile(
+                    profile,
+                    df,
+                    added_cols=added_cols,
+                    detailed_profiler=False,
+                    target_column=target_col,
+                )
             except Exception as e:
                 log_node(
                     "feature_engineering",
-                    "re-profile failed; continuing with stale profile",
+                    "extend_profile failed; falling back to full reprofile",
                     error=str(e)[:300],
                 )
+                try:
+                    profile = generate_profile(df, detailed_profiler=False, target_column=target_col)
+                except Exception as e2:
+                    log_node(
+                        "feature_engineering",
+                        "fallback reprofile also failed; continuing with stale profile",
+                        error=str(e2)[:300],
+                    )
 
     return {
         "working_df": df,
