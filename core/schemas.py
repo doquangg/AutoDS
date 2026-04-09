@@ -386,6 +386,9 @@ class CorrelationScanInput(BaseModel):
     target_column: str = Field(..., description="Column to compute correlations against.")
     top_n: int = Field(10, description="Number of top correlated columns to return.")
 
+class GetColumnForensicsInput(BaseModel):
+    column: str = Field(..., description="Exact column name to fetch the full forensic view for.")
+
 class WebSearchInput(BaseModel):
     query: str = Field(..., description="Search query to verify a data quality hypothesis. Be specific — include units, ranges, or domain context.")
     domains: Optional[List[str]] = Field(None, description="Optional list of domains to restrict results to authoritative sources (e.g., ['who.int', 'mayoclinic.org'] for medical data, ['sec.gov', 'reuters.com'] for financial data).")

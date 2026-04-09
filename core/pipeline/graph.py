@@ -76,7 +76,7 @@ from core.agents.agents import run_investigator_agent, run_codegen_agent, run_an
 from core.agents.feature_engineering import node_feature_engineering
 from core.agents.target_selector import select_target_column
 from core.runtime.sandbox import execute_plan_in_sandbox
-from core.runtime.tools import investigation_tools, set_working_df
+from core.runtime.tools import investigation_tools, set_working_df, set_working_profile
 from core.logger import log_node, log_routing, log_profile_summary
 from plugins.profiler import generate_profile
 from plugins.modeller import train_model
@@ -138,6 +138,7 @@ def node_investigator(state: AgentState):
 
     # Give tools access to the current DataFrame
     set_working_df(state["working_df"])
+    set_working_profile(state.get("profile"))
 
     result = run_investigator_agent(state, max_tool_calls=MAX_TOOL_CALLS)
 

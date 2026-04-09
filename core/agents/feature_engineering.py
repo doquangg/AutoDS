@@ -28,7 +28,7 @@ from core.schemas import (
     FeatureStep,
     CleaningLogEntry,
 )
-from core.runtime.tools import investigation_tools, set_working_df
+from core.runtime.tools import investigation_tools, set_working_df, set_working_profile
 from core.runtime.sandbox import execute_plan_in_sandbox
 from core.prompts import FE_PLANNER_SYSTEM_PROMPT, FE_CODEGEN_SYSTEM_PROMPT
 from core.logger import log_node, log_llm_request, log_llm_response
@@ -178,6 +178,7 @@ def run_fe_planner_agent(
     # Without this call, tools invoked during round 2/3 would inspect the
     # round-0 dataframe and miss columns added by prior rounds.
     set_working_df(df)
+    set_working_profile(profile)
 
     llm = get_fe_planner_llm()
     llm_with_tools = llm.bind_tools(
