@@ -82,6 +82,84 @@ def _get_task_type(state: AgentState) -> Optional[str]:
     return None
 
 
+def _summarize_findings(findings) -> str:
+    """
+    Render InvestigationFindings to a compact text block for the FE planner.
+
+    Deliberately narrow: we emit only the fields the planner needs to avoid
+    re-discovering work the Investigator already did.
+
+    - CRITICAL violations: show category + affected columns + a short
+      description. We skip INFO violations because they don't gate FE choices
+      and would inflate the prompt.
+    - Columns marked for drop: names only — the planner should treat them as
+      columns it should not reference in source_columns.
+    - Key caveats: verbatim, capped to the first 5 to keep the prompt tight.
+
+    Returns a stable skeleton even when findings are empty, so the prompt shape
+    is cache-friendly (prompt-caching keys on exact prefix strings).
+    """
+    if findings is None:
+        return "(investigation findings unavailable)"
+
+    # Tolerate both pydantic objects and raw dicts, mirroring _get_task_type.
+    def _attr(obj, name, default):
+        if obj is None:
+            return default
+        if hasattr(obj, name):
+            return getattr(obj, name)
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return default
+
+    violations = _attr(findings, "violations", []) or []
+    critical = [
+        v for v in violations
+        if _attr(v, "severity", "INFO") == "CRITICAL"
+    ]
+
+    columns_to_drop = _attr(findings, "columns_to_drop", []) or []
+    caveats = _attr(findings, "key_caveats", []) or []
+
+    # --- CRITICAL VIOLATIONS ---
+    if critical:
+        critical_lines = []
+        for v in critical:
+            category = _attr(v, "category", "OTHER")
+            affected = _attr(v, "affected_columns", []) or []
+            description = _attr(v, "description", "") or ""
+            # Cap description so a verbose finding can't dominate the prompt.
+            desc_short = description[:160]
+            critical_lines.append(
+                f"  - [{category}] {', '.join(affected)}: {desc_short}"
+            )
+        critical_block = "\n".join(critical_lines)
+    else:
+        critical_block = "  (none)"
+
+    # --- COLUMNS MARKED FOR DROP ---
+    if columns_to_drop:
+        drop_block = "  " + ", ".join(columns_to_drop)
+    else:
+        drop_block = "  (none)"
+
+    # --- KEY CAVEATS ---
+    if caveats:
+        caveat_lines = [f"  - {c[:200]}" for c in caveats[:5]]
+        caveat_block = "\n".join(caveat_lines)
+    else:
+        caveat_block = "  (none)"
+
+    return (
+        "CRITICAL VIOLATIONS (from Investigator):\n"
+        f"{critical_block}\n\n"
+        "COLUMNS MARKED FOR DROP (do not propose features on these):\n"
+        f"{drop_block}\n\n"
+        "KEY CAVEATS:\n"
+        f"{caveat_block}"
+    )
+
+
 def run_fe_planner_agent(
     state: AgentState,
     df,
