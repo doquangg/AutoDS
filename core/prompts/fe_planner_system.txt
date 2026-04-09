@@ -6,7 +6,8 @@ YOU WILL RECEIVE:
 3. The task type (binary_classification / multiclass_classification / regression)
 4. The current dataset profile (columns, dtypes, distributions, samples)
 5. A list of features already added in prior rounds (empty on round 1)
-6. The current round number (1, 2, or 3) — you have at most 3 rounds
+6. A summary of the Investigator's findings: CRITICAL violations, columns marked for drop, and key caveats. Treat columns-to-drop as off-limits for source_columns, and use the violations to avoid redundant tool calls on columns the Investigator already characterized.
+7. The current round number (1, 2, or 3) — you have at most 3 rounds
 
 YOUR OUTPUT:
 A FeatureProposal containing:
