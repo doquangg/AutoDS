@@ -12,7 +12,21 @@ from plugins.profiler import (
     extend_profile,
     generate_profile,
     profile_one_column,
+    refresh_profile_for_recipe,
 )
+
+
+class _FakeStep:
+    """Duck-typed CleaningStep for tests (avoids importing the real schema)."""
+
+    def __init__(self, operation, target_column):
+        self.operation = operation
+        self.target_column = target_column
+
+
+class _FakeRecipe:
+    def __init__(self, steps):
+        self.steps = steps
 
 
 def _sample_df():
@@ -115,3 +129,159 @@ def test_extend_profile_rejects_row_count_mismatch():
     except ValueError:
         return
     assert False, "expected ValueError for row count mismatch"
+
+
+def test_refresh_profile_with_cast_type_only_recomputes_target_column():
+    df1 = _sample_df()
+    base = generate_profile(df1, detailed_profiler=False, target_column="income")
+
+    df2 = df1.copy()
+    df2["age"] = df2["age"].astype(float) + 0.0  # dtype flip, values preserved
+    recipe = _FakeRecipe([_FakeStep("CAST_TYPE", "age")])
+
+    refreshed = refresh_profile_for_recipe(
+        base,
+        df1,
+        df2,
+        recipe,
+        detailed_profiler=False,
+        target_column="income",
+    )
+
+    # Columns other than "age" must be byte-equal to base
+    base_by_name = {c["name"]: c for c in base["columns"]}
+    for col in refreshed["columns"]:
+        if col["name"] != "age":
+            assert col == base_by_name[col["name"]]
+
+    # "age" must equal what a full profile would produce on df2.
+    full = generate_profile(df2, detailed_profiler=False, target_column="income")
+    full_age = next(c for c in full["columns"] if c["name"] == "age")
+    ref_age = next(c for c in refreshed["columns"] if c["name"] == "age")
+    assert ref_age == full_age
+
+
+def test_refresh_profile_drops_rows_falls_back_to_full_profile():
+    df1 = _sample_df()
+    base = generate_profile(df1, detailed_profiler=False, target_column="income")
+
+    df2 = df1.iloc[:5].copy()  # rows dropped
+    recipe = _FakeRecipe([_FakeStep("DROP_ROWS", "income")])
+
+    refreshed = refresh_profile_for_recipe(
+        base,
+        df1,
+        df2,
+        recipe,
+        detailed_profiler=False,
+        target_column="income",
+    )
+
+    # Must match a full profile byte-for-byte
+    full = generate_profile(df2, detailed_profiler=False, target_column="income")
+    assert refreshed["row_count"] == full["row_count"]
+    assert refreshed["columns"] == full["columns"]
+
+
+def test_refresh_profile_drop_column_removes_entry_without_recompute():
+    df1 = _sample_df()
+    base = generate_profile(df1, detailed_profiler=False, target_column="income")
+
+    df2 = df1.drop(columns=["city"])
+    recipe = _FakeRecipe([_FakeStep("DROP_COLUMN", "city")])
+
+    refreshed = refresh_profile_for_recipe(
+        base,
+        df1,
+        df2,
+        recipe,
+        detailed_profiler=False,
+        target_column="income",
+    )
+    names = [c["name"] for c in refreshed["columns"]]
+    assert "city" not in names
+    # Other columns unchanged
+    base_other = {c["name"]: c for c in base["columns"] if c["name"] != "city"}
+    ref_by_name = {c["name"]: c for c in refreshed["columns"]}
+    for name, col in base_other.items():
+        assert ref_by_name[name] == col
+
+
+def test_refresh_profile_custom_code_on_unknown_column_falls_back():
+    df1 = _sample_df()
+    base = generate_profile(df1, detailed_profiler=False, target_column="income")
+
+    df2 = df1.copy()
+    df2["income"] = df2["income"].fillna(0)  # custom code touched income
+    # Intentionally pass target_column=None to simulate an ambiguous scope
+    recipe = _FakeRecipe([_FakeStep("CUSTOM_CODE", None)])
+
+    refreshed = refresh_profile_for_recipe(
+        base,
+        df1,
+        df2,
+        recipe,
+        detailed_profiler=False,
+        target_column="income",
+    )
+    # Fallback should be byte-equal to a full profile
+    full = generate_profile(df2, detailed_profiler=False, target_column="income")
+    assert refreshed["columns"] == full["columns"]
+
+
+def test_refresh_profile_custom_code_on_known_column_recomputes_only_that_column():
+    df1 = _sample_df()
+    base = generate_profile(df1, detailed_profiler=False, target_column="income")
+
+    df2 = df1.copy()
+    df2["income"] = df2["income"].fillna(0)
+    recipe = _FakeRecipe([_FakeStep("CUSTOM_CODE", "income")])
+
+    refreshed = refresh_profile_for_recipe(
+        base,
+        df1,
+        df2,
+        recipe,
+        detailed_profiler=False,
+        target_column="income",
+    )
+
+    # Other columns byte-equal to base
+    base_by_name = {c["name"]: c for c in base["columns"]}
+    for col in refreshed["columns"]:
+        if col["name"] != "income":
+            assert col == base_by_name[col["name"]]
+
+    # "income" matches a full profile of df2
+    full = generate_profile(df2, detailed_profiler=False, target_column="income")
+    full_income = next(c for c in full["columns"] if c["name"] == "income")
+    ref_income = next(c for c in refreshed["columns"] if c["name"] == "income")
+    assert ref_income == full_income
+
+
+def test_refresh_profile_picks_up_invented_column_via_custom_code():
+    """If CUSTOM_CODE creates a brand-new column, refresh must profile it."""
+    df1 = _sample_df()
+    base = generate_profile(df1, detailed_profiler=False, target_column="income")
+
+    df2 = df1.copy()
+    df2["age_bucket"] = (df2["age"] // 10).astype(int)  # invented column
+    # Step targets a known column that wasn't touched, so dirty_cols is empty
+    # for the named target — but new_df has a column not in the existing
+    # profile, which the helper should pick up via the "invented" branch.
+    recipe = _FakeRecipe([_FakeStep("CUSTOM_CODE", "age")])
+
+    refreshed = refresh_profile_for_recipe(
+        base,
+        df1,
+        df2,
+        recipe,
+        detailed_profiler=False,
+        target_column="income",
+    )
+    names = {c["name"] for c in refreshed["columns"]}
+    assert "age_bucket" in names
+    full = generate_profile(df2, detailed_profiler=False, target_column="income")
+    full_by_name = {c["name"]: c for c in full["columns"]}
+    ref_by_name = {c["name"]: c for c in refreshed["columns"]}
+    assert ref_by_name["age_bucket"] == full_by_name["age_bucket"]

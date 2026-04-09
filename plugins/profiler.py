@@ -751,3 +751,142 @@ def extend_profile(
     out["row_count"] = row_count
     out["columns"] = columns
     return out
+
+
+def refresh_profile_for_recipe(
+    existing_profile: Dict[str, Any],
+    old_df: pd.DataFrame,
+    new_df: pd.DataFrame,
+    recipe,  # CleaningRecipe; we only read .steps
+    *,
+    detailed_profiler: bool = False,
+    target_column: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Targeted reprofile for the cleaning path.
+
+    Strategy:
+      1. If row count changed → full generate_profile (row drops invalidate
+         every column's completeness and downstream stats).
+      2. Walk recipe.steps; classify each:
+           DROP_ROWS, RENAME_COLUMN, unknown op,
+           or CUSTOM_CODE/CAST_TYPE without a target → full fallback.
+           DROP_COLUMN with target → mark dropped.
+           CAST_TYPE / CUSTOM_CODE with concrete target → mark dirty.
+      3. Any column present in new_df but not in the existing profile (and
+         not dropped) is treated as invented and profiled. Any existing
+         column that vanished without a DROP_COLUMN → full fallback.
+      4. Reuse all clean entries; recompute dirty + invented.
+
+    The fallback path is intentionally conservative: it's much cheaper to
+    rerun a full profile than to ship a profile that doesn't match the
+    actual dataframe state.
+    """
+    if len(new_df) != existing_profile.get("row_count", len(old_df)):
+        return generate_profile(
+            new_df,
+            detailed_profiler=detailed_profiler,
+            target_column=target_column,
+        )
+
+    dirty_cols: set[str] = set()
+    dropped_cols: set[str] = set()
+    full_fallback = False
+
+    for step in (getattr(recipe, "steps", None) or []):
+        op = getattr(step, "operation", None)
+        tgt = getattr(step, "target_column", None)
+
+        if op == "DROP_ROWS":
+            full_fallback = True
+            break
+
+        if op == "RENAME_COLUMN":
+            # Renames need parameters (old_name, new_name) we don't read here.
+            # Easiest correct behavior: full reprofile. Optimization opportunity
+            # if renames turn out to be common.
+            full_fallback = True
+            break
+
+        if op == "DROP_COLUMN":
+            if tgt:
+                dropped_cols.add(tgt)
+                continue
+            full_fallback = True
+            break
+
+        if op == "CAST_TYPE":
+            if tgt:
+                dirty_cols.add(tgt)
+                continue
+            full_fallback = True
+            break
+
+        if op == "CUSTOM_CODE":
+            if tgt and tgt in new_df.columns:
+                dirty_cols.add(tgt)
+                continue
+            # Unknown / missing target — we can't bound the scope.
+            full_fallback = True
+            break
+
+        # Unknown operation — be safe.
+        full_fallback = True
+        break
+
+    if full_fallback:
+        return generate_profile(
+            new_df,
+            detailed_profiler=detailed_profiler,
+            target_column=target_column,
+        )
+
+    existing_names = {c["name"] for c in existing_profile["columns"]}
+    new_names = set(new_df.columns)
+
+    # Columns that appeared out of nowhere (CUSTOM_CODE invented them).
+    invented = new_names - existing_names - dropped_cols
+    dirty_cols |= invented
+
+    # Columns that were in the old profile but disappeared without a DROP_COLUMN
+    # step — unsafe, fall back.
+    vanished = existing_names - new_names - dropped_cols
+    if vanished:
+        return generate_profile(
+            new_df,
+            detailed_profiler=detailed_profiler,
+            target_column=target_column,
+        )
+
+    row_count = int(len(new_df))
+    out_columns: list[dict] = []
+    for col in existing_profile["columns"]:
+        name = col["name"]
+        if name in dropped_cols:
+            continue
+        if name in dirty_cols:
+            continue  # will be recomputed below
+        out_columns.append(col)
+
+    for name in sorted(dirty_cols):
+        if name not in new_df.columns:
+            # A step targeted a column that got dropped by a subsequent step.
+            # Safest: full fallback.
+            return generate_profile(
+                new_df,
+                detailed_profiler=detailed_profiler,
+                target_column=target_column,
+            )
+        col_profile = profile_one_column(
+            new_df,
+            col_name=name,
+            row_count=row_count,
+            detailed_profiler=detailed_profiler,
+            ydata_col_metrics=None,
+        )
+        out_columns.append(col_profile.model_dump())
+
+    out = dict(existing_profile)
+    out["row_count"] = row_count
+    out["columns"] = out_columns
+    return out
