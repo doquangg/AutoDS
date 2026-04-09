@@ -33,6 +33,7 @@ from core.runtime.sandbox import execute_plan_in_sandbox
 from core.prompts import FE_PLANNER_SYSTEM_PROMPT, FE_CODEGEN_SYSTEM_PROMPT
 from core.logger import log_node, log_llm_request, log_llm_response
 from plugins.profiler import generate_profile
+from plugins.profile_views import profile_to_llm_json, ProfileViewName
 
 
 MAX_FE_ROUNDS = 3
@@ -48,13 +49,13 @@ def get_fe_codegen_llm():
     return _get_llm(os.environ.get("FE_CODEGEN_MODEL", "gpt-5.4-mini"))
 
 
-def _profile_to_json(profile) -> str:
-    """Serialize a DatasetProfile (dict or pydantic) to a JSON string."""
+def _profile_to_json(profile, view: ProfileViewName = "stats") -> str:
+    """Serialize a DatasetProfile (dict or pydantic) to a JSON string for LLM use."""
     if profile is None:
         return "{}"
     if hasattr(profile, "model_dump"):
-        return json.dumps(profile.model_dump(), indent=2, default=str)
-    return json.dumps(profile, indent=2, default=str)
+        profile = profile.model_dump()
+    return profile_to_llm_json(profile, view)
 
 
 def _summarize_applied(applied_so_far: List[FeatureStep]) -> str:
