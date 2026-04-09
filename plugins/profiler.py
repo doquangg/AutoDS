@@ -17,23 +17,32 @@ import pandas as pd
 import json
 import time
 
-from core.schemas import DatasetProfile, ColumnProfile, AlgorithmicQualityScore
+from core.schemas import DatasetProfile, ColumnProfile
 
 # ydata metric cap (keep profile compact for LLM/tokens)
 DEFAULT_MAX_METRICS_PER_COL = 20
 
 
 def _safe_float(x: Any) -> float | None:
-    """Convert numpy/pandas scalars to python float; return None if not finite."""
+    """Convert numpy/pandas scalars to python float rounded to 4 significant figures.
+
+    Returns None if the value is not finite. Rounding happens at the source
+    so every downstream consumer (LLMs, disk artifacts, quality checks) sees
+    a compact representation without needing its own rounding pass.
+    """
     if x is None:
         return None
     try:
         val = float(x)
     except Exception:
         return None
-    if math.isfinite(val):
-        return val
-    return None
+    if not math.isfinite(val):
+        return None
+    if val == 0.0:
+        return 0.0
+    # 4 significant figures — keeps skewness like 0.0003421 readable and
+    # strips meaningless trailing precision on values like 123.456789.
+    return float(f"{val:.4g}")
 
 
 def _infer_type(series: pd.Series, s_nonnull: pd.Series | None = None) -> str:
@@ -403,180 +412,211 @@ def compute_anomaly_summary(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
-def _profile_base_metrics(
-    columns: List[Dict[str, Any]],
-) -> tuple[float, float, List[Dict[str, Any]], List[str]]:
-    """Shared helper for compute_structural_score and compute_quality_score.
-
-    Returns: (completeness_score, structural_integrity, numeric_cols, base_flags)
-    where base_flags contains inf_nan_present flags only.
+def profile_one_column(
+    df: pd.DataFrame,
+    col_name: str,
+    *,
+    row_count: int,
+    detailed_profiler: bool,
+    ydata_col_metrics: Dict[str, Any] | None,
+) -> ColumnProfile:
     """
-    completeness_score = sum(c.get("completeness", 0.0) for c in columns) / len(columns)
+    Compute a ColumnProfile for exactly one column of ``df``.
 
-    numeric_cols = [c for c in columns if c.get("inferred_type") == "Numeric"]
-    if numeric_cols:
-        clean_cols = sum(1 for c in numeric_cols if (c.get("inf_nan_count") or 0) == 0)
-        structural_integrity = clean_cols / len(numeric_cols)
-        bad_cols = [c.get("name") for c in numeric_cols if (c.get("inf_nan_count") or 0) > 0]
-        base_flags = [f"inf_nan_present: {', '.join(bad_cols)}"] if bad_cols else []
-    else:
-        structural_integrity = 1.0
-        base_flags = []
+    This is the per-column body of generate_profile, factored out so callers
+    that already have a previous profile can recompute only the columns that
+    actually changed (see extend_profile / refresh_profile_for_recipe).
 
-    return completeness_score, structural_integrity, numeric_cols, base_flags
-
-
-def compute_structural_score(
-    profile: Dict[str, Any],
-    target_column: str | None = None,
-) -> Dict[str, Any]:
+    Pure function: given the same inputs, must return the same ColumnProfile
+    that generate_profile would produce for the same column on the same data.
+    Global ydata bootstrap warnings (ydata_fallback_to_baseline,
+    ydata_skipped_wide_table) live in generate_profile, NOT here, because
+    they apply to the whole-dataframe ydata run rather than to any one column.
     """
-    Tier 1: Compute a deterministic structural score from profile statistics.
+    col = col_name
+    series = df[col]
+    s_nonnull = series.dropna()  # compute once; passed to all helpers below
+    non_null = len(s_nonnull)
+    completeness = (non_null / row_count) if row_count > 0 else 0.0
+    try:
+        unique_count = int(series.nunique(dropna=True))
+    except TypeError:
+        # Handle unhashable objects (e.g., dict/list) by counting uniques on JSON-safe strings
+        unique_count = int(s_nonnull.map(_to_json_safe).astype(str).nunique())
 
-    Focuses on hard structural issues: completeness and inf/nan presence.
-    Does NOT assess value plausibility or semantic correctness (that's Tier 2+3).
+    unique_factor = (unique_count / row_count) if row_count > 0 else 0.0
 
-    Returns a dict with: structural_score (float), completeness (float), flags (list).
-    """
-    columns = profile.get("columns", [])
-    if not columns:
-        return {"structural_score": 0.0, "completeness": 0.0, "flags": ["no_columns_in_profile"]}
+    inferred_type = _infer_type(series, s_nonnull=s_nonnull)
 
-    row_count = profile.get("row_count", 0)
-    completeness_score, structural_integrity, _, flags = _profile_base_metrics(columns)
+    # ------------------------------------------------------------------
+    # Optional profiler signals (optional / non-breaking)
+    # ------------------------------------------------------------------
+    actual_dtype = str(series.dtype)
 
-    # Target column health
-    target_penalty = 0.0
-    if target_column:
-        target_col = next((c for c in columns if c.get("name") == target_column), None)
-        if target_col:
-            inf_nan = target_col.get("inf_nan_count") or 0
-            if inf_nan > 0 and row_count > 0:
-                target_penalty = min(inf_nan / row_count, 1.0)
-                flags.append(f"target_inf_nan: {target_column} has {inf_nan} inf/nan values")
-        else:
-            flags.append(f"target_column_not_found: {target_column}")
+    # Strong TYPE_ERROR hint: inferred Numeric/Datetime but stored as object/string
+    type_mismatch = bool(
+        inferred_type in ("Numeric", "Datetime")
+        and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series))
+    )
 
-    # Weighted composite: structural integrity (primary) with target penalty
-    if target_column and target_penalty > 0:
-        structural_score = structural_integrity * (1.0 - target_penalty * 0.5)
-    else:
-        structural_score = structural_integrity
+    # Random sample values (more representative than top-5 frequent)
+    random_sample_values = None
+    if non_null > 0:
+        try:
+            random_sample_values = [
+                _to_json_safe(v)
+                for v in s_nonnull.sample(n=min(5, non_null), random_state=42).tolist()
+            ]
+        except Exception:
+            random_sample_values = [_to_json_safe(v) for v in s_nonnull.head(5).tolist()]
 
-    structural_score = max(0.0, min(1.0, structural_score))
+    # Coercion failures (count + sample bad values)
+    coercion_failure_count = None
+    coercion_failure_samples = None
 
-    return {
-        "structural_score": round(structural_score, 3),
-        "completeness": round(completeness_score, 3),
-        "flags": flags,
-    }
+    # Percentiles for numeric columns (IQR reasoning)
+    q1 = None
+    q3 = None
 
+    # Datetime competing format samples
+    datetime_format_samples = None
 
-def compute_quality_score(
-    profile: Dict[str, Any],
-    target_column: str | None = None,
-) -> Dict[str, Any]:
-    """
-    Compute a deterministic quality score from profile statistics.
+    min_value = max_value = mean = skewness = None
 
-    Returns a dict compatible with AlgorithmicQualityScore:
-        overall, completeness, target_integrity, value_plausibility,
-        structural_integrity, flags.
+    median = None
+    zero_count = None
+    negative_count = None
+    inf_nan_count = None
 
-    Weights (with target column):
-        completeness       0.00  (informational only — AutoGluon handles missing features)
-        target_integrity   0.45
-        value_plausibility 0.30
-        structural_integrity 0.25
+    earliest_date = None
+    latest_date = None
+    datetime_format_consistency = None
 
-    Weights (no target column):
-        completeness       0.00
-        value_plausibility 0.55
-        structural_integrity 0.45
-    """
-    columns = profile.get("columns", [])
-    if not columns:
-        return AlgorithmicQualityScore(
-            overall=0.0, completeness=0.0, target_integrity=None,
-            value_plausibility=0.0, structural_integrity=0.0,
-            flags=["no_columns_in_profile"],
-        ).model_dump()
+    regex_format_consistency = None
+    dominant_pattern = None
 
-    row_count = profile.get("row_count", 0)
-    completeness_score, structural_integrity, numeric_cols, flags = _profile_base_metrics(columns)
+    s_num_clean: pd.Series | None = None
+    if inferred_type == "Numeric":
+        s_num = pd.to_numeric(series, errors="coerce")
+        original_nan = row_count - non_null
+        inf_values = int(np.isinf(s_num).sum()) if len(s_num) else 0
+        s_num = s_num.replace([np.inf, -np.inf], np.nan)
+        if s_num.notna().any():
+            min_value = _safe_float(s_num.min())
+            max_value = _safe_float(s_num.max())
+            mean = _safe_float(s_num.mean())
+            skewness = _safe_float(s_num.skew())
 
-    # --- Target integrity sub-score ---
-    target_integrity = None
-    if target_column:
-        target_col = next(
-            (c for c in columns if c.get("name") == target_column), None
-        )
-        if target_col:
-            ti = target_col.get("completeness", 0.0)
-            # Penalize inf/nan in target
-            inf_nan = target_col.get("inf_nan_count") or 0
-            if inf_nan > 0 and row_count > 0:
-                penalty = min(inf_nan / row_count, 1.0)
-                ti = ti * (1.0 - penalty)
-                flags.append(
-                    f"target_inf_nan: {target_column} has {inf_nan} inf/nan values"
+            median = _safe_float(s_num.median())
+
+        # Counts (computed even if all NaN after coercion)
+        zero_count = int((s_num == 0).sum()) if len(s_num) else 0
+        negative_count = int((s_num < 0).sum()) if len(s_num) else 0
+        # Count only inf values and coercion failures, NOT natural missing data.
+        # AutoGluon handles NaN natively, so natural missingness is not a defect.
+        coercion_failures = int(s_num.isna().sum()) - original_nan - inf_values
+        # Percentiles (Q1/Q3) for numeric columns
+        if s_num.notna().any():
+            q1 = _safe_float(s_num.quantile(0.25))
+            q3 = _safe_float(s_num.quantile(0.75))
+
+        # Coercion failures: count + sample raw values
+        coercion_failure_count = int(coercion_failures)
+        try:
+            coerced_nonnull = pd.to_numeric(s_nonnull, errors="coerce")
+            bad_mask = coerced_nonnull.isna()
+            if bad_mask.any():
+                coercion_failure_samples = (
+                    s_nonnull[bad_mask].astype(str).drop_duplicates().head(5).tolist()
                 )
-            # Check for heaping in target
-            warnings_list = target_col.get("semantic_warnings", [])
-            for w in warnings_list:
-                if "Value Heaping" in w:
-                    ti *= 0.7
-                    flags.append(f"target_heaping: {target_column} — {w}")
-                    break
-            target_integrity = ti
-        else:
-            flags.append(f"target_column_not_found: {target_column}")
-
-    # --- Value plausibility sub-score ---
-    # Penalizes heaping/template patterns in numeric columns
-    if numeric_cols:
-        plausibility_scores = []
-        for col in numeric_cols:
-            col_score = 1.0
-            warnings_list = col.get("semantic_warnings", [])
-            for w in warnings_list:
-                if "Value Heaping" in w:
-                    col_score *= 0.4
-                    col_name = col.get("name", "unknown")
-                    flags.append(f"heaping: {col_name} — {w}")
-                    break
-                if "Possible Sentinel" in w:
-                    col_score *= 0.7
-            plausibility_scores.append(col_score)
-        value_plausibility = sum(plausibility_scores) / len(plausibility_scores)
-    else:
-        value_plausibility = 1.0
-
-    # --- Weighted composite ---
-    # Completeness is informational only (weight 0) because AutoGluon
-    # handles missing feature data natively.
-    if target_integrity is not None:
-        overall = (
-            0.45 * target_integrity
-            + 0.30 * value_plausibility
-            + 0.25 * structural_integrity
+            else:
+                coercion_failure_samples = []
+        except Exception:
+            coercion_failure_samples = []
+        assert coercion_failures >= 0, (
+            f"Column '{col}': negative coercion_failures={coercion_failures} "
+            f"(isna={int(s_num.isna().sum())}, original_nan={original_nan}, inf={inf_values})"
         )
-    else:
-        overall = (
-            0.55 * value_plausibility
-            + 0.45 * structural_integrity
-        )
+        inf_nan_count = inf_values + coercion_failures
+        s_num_clean = s_num.dropna()  # precomputed for _semantic_warnings
 
-    overall = max(0.0, min(1.0, overall))
+    top_vals = _top_frequent_values(series, k=5, s_nonnull=s_nonnull)
 
-    return AlgorithmicQualityScore(
-        overall=round(overall, 3),
-        completeness=round(completeness_score, 3),
-        target_integrity=round(target_integrity, 3) if target_integrity is not None else None,
-        value_plausibility=round(value_plausibility, 3),
-        structural_integrity=round(structural_integrity, 3),
-        flags=flags,
-    ).model_dump()
+    future_date_count = None
+    if inferred_type == "Datetime":
+        datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
+        future_date_count = _count_future_dates(s_nonnull)
+
+        # Datetime: sample competing raw formats
+        if non_null > 0:
+            dt_strings = s_nonnull.astype(str)
+            try:
+                datetime_format_samples = (
+                    dt_strings.sample(n=min(5, len(dt_strings)), random_state=42)
+                    .drop_duplicates()
+                    .head(5)
+                    .tolist()
+                )
+            except Exception:
+                datetime_format_samples = dt_strings.drop_duplicates().head(5).tolist()
+
+            # coercion failures for datetime parsing (count + samples)
+            try:
+                try:
+                    parsed = pd.to_datetime(dt_strings.head(200), errors="coerce", format="mixed")
+                except TypeError:
+                    # Older pandas fallback (no format="mixed")
+                    parsed = pd.to_datetime(dt_strings.head(200), errors="coerce")
+                bad_mask = parsed.isna()
+                coercion_failure_count = int(bad_mask.sum())
+                if bad_mask.any():
+                    coercion_failure_samples = (
+                        dt_strings.head(200)[bad_mask].drop_duplicates().head(5).tolist()
+                    )
+                else:
+                    coercion_failure_samples = []
+            except Exception:
+                coercion_failure_count = None
+                coercion_failure_samples = None
+
+    # Regex/pattern consistency for string/categorical-like columns
+    if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+        regex_format_consistency, dominant_pattern = _regex_consistency(series)
+    issues = _semantic_warnings(series, inferred_type, unique_factor, s_nonnull=s_nonnull, s_num_clean=s_num_clean, future_date_count=future_date_count)
+
+    return ColumnProfile(
+        name=str(col),
+        inferred_type=inferred_type,
+        completeness=float(completeness),
+        unique_factor=float(unique_factor),
+        min_value=min_value,
+        max_value=max_value,
+        mean=mean,
+        skewness=skewness,
+        median=median,
+        zero_count=zero_count,
+        negative_count=negative_count,
+        inf_nan_count=inf_nan_count,
+        earliest_date=earliest_date,
+        latest_date=latest_date,
+        datetime_format_consistency=datetime_format_consistency,
+        future_date_count=future_date_count,
+        regex_format_consistency=regex_format_consistency,
+        dominant_pattern=dominant_pattern,
+        ydata_metrics=ydata_col_metrics if detailed_profiler else None,
+
+        # Optional profiler additions (all optional)
+        actual_dtype=actual_dtype,
+        type_mismatch=type_mismatch,
+        coercion_failure_count=coercion_failure_count,
+        coercion_failure_samples=coercion_failure_samples,
+        random_sample_values=random_sample_values,
+        q1=q1,
+        q3=q3,
+        datetime_format_samples=datetime_format_samples,
+        top_frequent_values=top_vals,
+        semantic_warnings=issues,
+    )
 
 
 def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_column: str | None = None) -> Dict[str, Any]:
@@ -622,202 +662,231 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
     columns: List[ColumnProfile] = []
 
     for col in df.columns:
-        series = df[col]
-        s_nonnull = series.dropna()  # compute once; passed to all helpers below
-        non_null = len(s_nonnull)
-        completeness = (non_null / row_count) if row_count > 0 else 0.0
-        try:
-            unique_count = int(series.nunique(dropna=True))
-        except TypeError:
-            # Handle unhashable objects (e.g., dict/list) by counting uniques on JSON-safe strings
-            unique_count = int(s_nonnull.map(_to_json_safe).astype(str).nunique())
-
-        unique_factor = (unique_count / row_count) if row_count > 0 else 0.0
-
-        inferred_type = _infer_type(series, s_nonnull=s_nonnull)
-
-        # ------------------------------------------------------------------
-        # Optional profiler signals (optional / non-breaking)
-        # ------------------------------------------------------------------
-        actual_dtype = str(series.dtype)
-
-        # Strong TYPE_ERROR hint: inferred Numeric/Datetime but stored as object/string
-        type_mismatch = bool(
-            inferred_type in ("Numeric", "Datetime")
-            and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series))
+        col_profile = profile_one_column(
+            df,
+            col_name=str(col),
+            row_count=row_count,
+            detailed_profiler=detailed_profiler,
+            ydata_col_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
         )
-
-        # Random sample values (more representative than top-5 frequent)
-        random_sample_values = None
-        if non_null > 0:
-            try:
-                random_sample_values = [
-                    _to_json_safe(v)
-                    for v in s_nonnull.sample(n=min(5, non_null), random_state=42).tolist()
-                ]
-            except Exception:
-                random_sample_values = [_to_json_safe(v) for v in s_nonnull.head(5).tolist()]
-
-        # Coercion failures (count + sample bad values)
-        coercion_failure_count = None
-        coercion_failure_samples = None
-
-        # Percentiles for numeric columns (IQR reasoning)
-        q1 = None
-        q3 = None
-
-        # Datetime competing format samples
-        datetime_format_samples = None
-
-        min_value = max_value = mean = skewness = None
-
-        median = None
-        zero_count = None
-        negative_count = None
-        inf_nan_count = None
-
-        earliest_date = None
-        latest_date = None
-        datetime_format_consistency = None
-
-        regex_format_consistency = None
-        dominant_pattern = None
-
-        s_num_clean: pd.Series | None = None
-        if inferred_type == "Numeric":
-            s_num = pd.to_numeric(series, errors="coerce")
-            original_nan = row_count - non_null
-            inf_values = int(np.isinf(s_num).sum()) if len(s_num) else 0
-            s_num = s_num.replace([np.inf, -np.inf], np.nan)
-            if s_num.notna().any():
-                min_value = _safe_float(s_num.min())
-                max_value = _safe_float(s_num.max())
-                mean = _safe_float(s_num.mean())
-                skewness = _safe_float(s_num.skew())
-
-                median = _safe_float(s_num.median())
-
-            # Counts (computed even if all NaN after coercion)
-            zero_count = int((s_num == 0).sum()) if len(s_num) else 0
-            negative_count = int((s_num < 0).sum()) if len(s_num) else 0
-            # Count only inf values and coercion failures, NOT natural missing data.
-            # AutoGluon handles NaN natively, so natural missingness is not a defect.
-            coercion_failures = int(s_num.isna().sum()) - original_nan - inf_values
-            # Percentiles (Q1/Q3) for numeric columns
-            if s_num.notna().any():
-                q1 = _safe_float(s_num.quantile(0.25))
-                q3 = _safe_float(s_num.quantile(0.75))
-
-            # Coercion failures: count + sample raw values
-            coercion_failure_count = int(coercion_failures)
-            try:
-                coerced_nonnull = pd.to_numeric(s_nonnull, errors="coerce")
-                bad_mask = coerced_nonnull.isna()
-                if bad_mask.any():
-                    coercion_failure_samples = (
-                        s_nonnull[bad_mask].astype(str).drop_duplicates().head(5).tolist()
-                    )
-                else:
-                    coercion_failure_samples = []
-            except Exception:
-                coercion_failure_samples = []
-            assert coercion_failures >= 0, (
-                f"Column '{col}': negative coercion_failures={coercion_failures} "
-                f"(isna={int(s_num.isna().sum())}, original_nan={original_nan}, inf={inf_values})"
-            )
-            inf_nan_count = inf_values + coercion_failures
-            s_num_clean = s_num.dropna()  # precomputed for _semantic_warnings
-
-        top_vals = _top_frequent_values(series, k=5, s_nonnull=s_nonnull)
-
-        future_date_count = None
-        if inferred_type == "Datetime":
-            datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
-            future_date_count = _count_future_dates(s_nonnull)
-
-            # Datetime: sample competing raw formats
-            if non_null > 0:
-                dt_strings = s_nonnull.astype(str)
-                try:
-                    datetime_format_samples = (
-                        dt_strings.sample(n=min(5, len(dt_strings)), random_state=42)
-                        .drop_duplicates()
-                        .head(5)
-                        .tolist()
-                    )
-                except Exception:
-                    datetime_format_samples = dt_strings.drop_duplicates().head(5).tolist()
-
-                # coercion failures for datetime parsing (count + samples)
-                try:
-                    try:
-                        parsed = pd.to_datetime(dt_strings.head(200), errors="coerce", format="mixed")
-                    except TypeError:
-                        # Older pandas fallback (no format="mixed")
-                        parsed = pd.to_datetime(dt_strings.head(200), errors="coerce")
-                    bad_mask = parsed.isna()
-                    coercion_failure_count = int(bad_mask.sum())
-                    if bad_mask.any():
-                        coercion_failure_samples = (
-                            dt_strings.head(200)[bad_mask].drop_duplicates().head(5).tolist()
-                        )
-                    else:
-                        coercion_failure_samples = []
-                except Exception:
-                    coercion_failure_count = None
-                    coercion_failure_samples = None
-
-        # Regex/pattern consistency for string/categorical-like columns
-        if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
-            regex_format_consistency, dominant_pattern = _regex_consistency(series)
-        issues = _semantic_warnings(series, inferred_type, unique_factor, s_nonnull=s_nonnull, s_num_clean=s_num_clean, future_date_count=future_date_count)
         if detailed_profiler:
+            # Global ydata-bootstrap warnings: applied per-column for backward
+            # compatibility, but they describe the whole-dataframe ydata run,
+            # not anything column-specific. Keeping them out of profile_one_column
+            # so it can stay a pure per-column function.
             if ydata_error:
-                issues.append("ydata_fallback_to_baseline")
+                col_profile.semantic_warnings.append("ydata_fallback_to_baseline")
             elif ydata_skipped == "wide_table":
-                issues.append("ydata_skipped_wide_table")
-
-        columns.append(
-            ColumnProfile(
-                name=str(col),
-                inferred_type=inferred_type,
-                completeness=float(completeness),
-                unique_factor=float(unique_factor),
-                min_value=min_value,
-                max_value=max_value,
-                mean=mean,
-                skewness=skewness,
-                median=median,
-                zero_count=zero_count,
-                negative_count=negative_count,
-                inf_nan_count=inf_nan_count,
-                earliest_date=earliest_date,
-                latest_date=latest_date,
-                datetime_format_consistency=datetime_format_consistency,
-                future_date_count=future_date_count,
-                regex_format_consistency=regex_format_consistency,
-                dominant_pattern=dominant_pattern,
-                ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
-
-                # Optional profiler additions (all optional)
-                actual_dtype=actual_dtype,
-                type_mismatch=type_mismatch,
-                coercion_failure_count=coercion_failure_count,
-                coercion_failure_samples=coercion_failure_samples,
-                random_sample_values=random_sample_values,
-                q1=q1,
-                q3=q3,
-                datetime_format_samples=datetime_format_samples,
-                top_frequent_values=top_vals,
-                semantic_warnings=issues,
-            )
-        )
+                col_profile.semantic_warnings.append("ydata_skipped_wide_table")
+        columns.append(col_profile)
 
     profile = DatasetProfile(row_count=row_count, columns=columns)
     # Return plain dict for JSON serialization
     result = profile.model_dump()
 
-    # Compute and attach algorithmic quality score
-    result["algorithmic_quality_score"] = compute_quality_score(result, target_column=target_column)
-
     return result
+
+
+def extend_profile(
+    existing_profile: Dict[str, Any],
+    new_df: pd.DataFrame,
+    added_cols: List[str],
+    *,
+    detailed_profiler: bool = False,
+    target_column: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Produce a new profile dict for ``new_df`` by reusing all entries from
+    ``existing_profile`` unchanged and computing fresh ColumnProfile entries
+    only for ``added_cols``.
+
+    Preconditions (checked):
+      - every name in ``added_cols`` is present in new_df.columns
+      - every column already in existing_profile is still present in new_df
+      - len(new_df) equals existing_profile['row_count']
+
+    This function is ONLY appropriate when the transformation between the
+    previous df and new_df was strictly additive (new columns added, no
+    existing column mutated, no rows dropped). The caller (currently the
+    feature_engineering round-end reprofile) is responsible for enforcing
+    that contract; if there's any doubt, fall back to generate_profile.
+    """
+    missing = [c for c in added_cols if c not in new_df.columns]
+    if missing:
+        raise KeyError(f"added_cols not in new_df: {missing}")
+
+    existing_row_count = existing_profile.get("row_count", len(new_df))
+    if len(new_df) != existing_row_count:
+        raise ValueError(
+            f"extend_profile expects same row count "
+            f"(existing={existing_row_count}, new={len(new_df)}). "
+            f"Use refresh_profile_for_recipe or generate_profile instead."
+        )
+
+    existing_names = {c["name"] for c in existing_profile["columns"]}
+    for name in existing_names:
+        if name not in new_df.columns:
+            raise ValueError(
+                f"extend_profile expects all existing columns to remain in new_df; "
+                f"missing '{name}'. Use generate_profile instead."
+            )
+
+    # Reuse existing entries verbatim
+    columns = list(existing_profile["columns"])
+
+    # Compute and append new ones (FE rounds never pass ydata through, so
+    # ydata_col_metrics is always None on this path)
+    row_count = int(len(new_df))
+    for name in added_cols:
+        col_profile = profile_one_column(
+            new_df,
+            col_name=name,
+            row_count=row_count,
+            detailed_profiler=detailed_profiler,
+            ydata_col_metrics=None,
+        )
+        columns.append(col_profile.model_dump())
+
+    out = dict(existing_profile)
+    out["row_count"] = row_count
+    out["columns"] = columns
+    return out
+
+
+def refresh_profile_for_recipe(
+    existing_profile: Dict[str, Any],
+    old_df: pd.DataFrame,
+    new_df: pd.DataFrame,
+    recipe,  # CleaningRecipe; we only read .steps
+    *,
+    detailed_profiler: bool = False,
+    target_column: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Targeted reprofile for the cleaning path.
+
+    Strategy:
+      1. If row count changed → full generate_profile (row drops invalidate
+         every column's completeness and downstream stats).
+      2. Walk recipe.steps; classify each:
+           DROP_ROWS, RENAME_COLUMN, unknown op,
+           or CUSTOM_CODE/CAST_TYPE without a target → full fallback.
+           DROP_COLUMN with target → mark dropped.
+           CAST_TYPE / CUSTOM_CODE with concrete target → mark dirty.
+      3. Any column present in new_df but not in the existing profile (and
+         not dropped) is treated as invented and profiled. Any existing
+         column that vanished without a DROP_COLUMN → full fallback.
+      4. Reuse all clean entries; recompute dirty + invented.
+
+    The fallback path is intentionally conservative: it's much cheaper to
+    rerun a full profile than to ship a profile that doesn't match the
+    actual dataframe state.
+    """
+    if len(new_df) != existing_profile.get("row_count", len(old_df)):
+        return generate_profile(
+            new_df,
+            detailed_profiler=detailed_profiler,
+            target_column=target_column,
+        )
+
+    dirty_cols: set[str] = set()
+    dropped_cols: set[str] = set()
+    full_fallback = False
+
+    for step in (getattr(recipe, "steps", None) or []):
+        op = getattr(step, "operation", None)
+        tgt = getattr(step, "target_column", None)
+
+        if op == "DROP_ROWS":
+            full_fallback = True
+            break
+
+        if op == "RENAME_COLUMN":
+            # Renames need parameters (old_name, new_name) we don't read here.
+            # Easiest correct behavior: full reprofile. Optimization opportunity
+            # if renames turn out to be common.
+            full_fallback = True
+            break
+
+        if op == "DROP_COLUMN":
+            if tgt:
+                dropped_cols.add(tgt)
+                continue
+            full_fallback = True
+            break
+
+        if op == "CAST_TYPE":
+            if tgt:
+                dirty_cols.add(tgt)
+                continue
+            full_fallback = True
+            break
+
+        if op == "CUSTOM_CODE":
+            if tgt and tgt in new_df.columns:
+                dirty_cols.add(tgt)
+                continue
+            # Unknown / missing target — we can't bound the scope.
+            full_fallback = True
+            break
+
+        # Unknown operation — be safe.
+        full_fallback = True
+        break
+
+    if full_fallback:
+        return generate_profile(
+            new_df,
+            detailed_profiler=detailed_profiler,
+            target_column=target_column,
+        )
+
+    existing_names = {c["name"] for c in existing_profile["columns"]}
+    new_names = set(new_df.columns)
+
+    # Columns that appeared out of nowhere (CUSTOM_CODE invented them).
+    invented = new_names - existing_names - dropped_cols
+    dirty_cols |= invented
+
+    # Columns that were in the old profile but disappeared without a DROP_COLUMN
+    # step — unsafe, fall back.
+    vanished = existing_names - new_names - dropped_cols
+    if vanished:
+        return generate_profile(
+            new_df,
+            detailed_profiler=detailed_profiler,
+            target_column=target_column,
+        )
+
+    row_count = int(len(new_df))
+    out_columns: list[dict] = []
+    for col in existing_profile["columns"]:
+        name = col["name"]
+        if name in dropped_cols:
+            continue
+        if name in dirty_cols:
+            continue  # will be recomputed below
+        out_columns.append(col)
+
+    for name in sorted(dirty_cols):
+        if name not in new_df.columns:
+            # A step targeted a column that got dropped by a subsequent step.
+            # Safest: full fallback.
+            return generate_profile(
+                new_df,
+                detailed_profiler=detailed_profiler,
+                target_column=target_column,
+            )
+        col_profile = profile_one_column(
+            new_df,
+            col_name=name,
+            row_count=row_count,
+            detailed_profiler=detailed_profiler,
+            ydata_col_metrics=None,
+        )
+        out_columns.append(col_profile.model_dump())
+
+    out = dict(existing_profile)
+    out["row_count"] = row_count
+    out["columns"] = out_columns
+    return out

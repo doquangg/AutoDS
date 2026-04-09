@@ -13,7 +13,8 @@
 ################################################################################
 
 from __future__ import annotations
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
+import json
 import os
 import pandas as pd
 import numpy as np
@@ -26,9 +27,11 @@ from core.schemas import (
     ValueDistributionInput,
     NullCoOccurrenceInput,
     CorrelationScanInput,
+    GetColumnForensicsInput,
     WebSearchInput,
 )
 from core.logger import log_tool_call
+from plugins.profile_views import FORENSIC_COLUMN_FIELDS, _project_column
 
 # ---------------------------------------------------------------------------
 # Module-level DataFrame reference. Set by the graph node before the
@@ -38,6 +41,10 @@ from core.logger import log_tool_call
 # serialization. The tools read from this reference directly.
 # ---------------------------------------------------------------------------
 _current_df: Optional[pd.DataFrame] = None
+
+# Module-level profile reference. The graph node sets this alongside
+# set_working_df() so tools can answer profile questions without re-profiling.
+_current_profile: Optional[Dict[str, Any]] = None
 
 # Web search rate limiting. Reset each time set_working_df() is called
 # (i.e., at the start of each agent pass).
@@ -50,6 +57,12 @@ def set_working_df(df: pd.DataFrame) -> None:
     global _current_df, _web_search_count
     _current_df = df
     _web_search_count = 0
+
+
+def set_working_profile(profile: Optional[Dict[str, Any]]) -> None:
+    """Called by the graph node to give tools access to the current profile."""
+    global _current_profile
+    _current_profile = profile
 
 
 def _get_df() -> pd.DataFrame:
@@ -297,6 +310,34 @@ def correlation_scan(target_column: str, top_n: int = 10) -> str:
     return result
 
 
+@tool("get_column_forensics", args_schema=GetColumnForensicsInput)
+def get_column_forensics(column: str) -> str:
+    """
+    Return the full forensic view (stats + samples + coercion info + patterns)
+    for a single column. Use this when the default profile view is missing
+    a field you need — for example, random_sample_values, coercion_failure_samples,
+    or dominant_pattern. Costs only the tokens for one column, not the whole profile.
+    """
+    params = {"column": column}
+    if _current_profile is None:
+        result = "No profile available. Cannot drill down."
+        log_tool_call("get_column_forensics", params, result)
+        return result
+
+    columns = _current_profile.get("columns", [])
+    col = next((c for c in columns if c.get("name") == column), None)
+    if col is None:
+        available = ", ".join(c.get("name", "?") for c in columns)
+        result = f"Column '{column}' not found. Available: {available}"
+        log_tool_call("get_column_forensics", params, result)
+        return result
+
+    projection = _project_column(col, FORENSIC_COLUMN_FIELDS)
+    result = json.dumps(projection, separators=(",", ":"), default=str)
+    log_tool_call("get_column_forensics", params, result)
+    return result
+
+
 @tool("web_search", args_schema=WebSearchInput)
 def web_search(query: str, domains: Optional[List[str]] = None) -> str:
     """
@@ -388,5 +429,6 @@ investigation_tools = [
     value_distribution,
     null_co_occurrence,
     correlation_scan,
+    get_column_forensics,
     web_search,
 ]

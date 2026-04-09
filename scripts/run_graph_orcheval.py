@@ -551,11 +551,7 @@ def main() -> None:
         print(f"  Columns to drop     : {fd.get('columns_to_drop', [])}")
 
     pass_count = result.get("pass_count", 0)
-    profile = result.get("profile") or {}
-    algo_score = (profile.get("algorithmic_quality_score") or {}).get("overall")
-    score_str = f"{algo_score:.2f}" if algo_score is not None else "N/A"
     print(f"  Cleaning passes     : {pass_count}")
-    print(f"  Final quality score : {score_str}")
     print(f"  Final answer        : {result.get('final_answer', 'N/A')}")
 
     if result.get("latest_error"):

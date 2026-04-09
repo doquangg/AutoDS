@@ -76,9 +76,9 @@ from core.agents.agents import run_investigator_agent, run_codegen_agent, run_an
 from core.agents.feature_engineering import node_feature_engineering
 from core.agents.target_selector import select_target_column
 from core.runtime.sandbox import execute_plan_in_sandbox
-from core.runtime.tools import investigation_tools, set_working_df
+from core.runtime.tools import investigation_tools, set_working_df, set_working_profile
 from core.logger import log_node, log_routing, log_profile_summary
-from plugins.profiler import generate_profile
+from plugins.profiler import generate_profile, refresh_profile_for_recipe
 from plugins.modeller import train_model
 
 
@@ -138,6 +138,7 @@ def node_investigator(state: AgentState):
 
     # Give tools access to the current DataFrame
     set_working_df(state["working_df"])
+    set_working_profile(state.get("profile"))
 
     result = run_investigator_agent(state, max_tool_calls=MAX_TOOL_CALLS)
 
@@ -193,6 +194,9 @@ def node_sandbox(state: AgentState):
         updates["retry_count"] = state["retry_count"] + 1
     else:
         print(">>> Execution Successful")
+        # Stash the pre-sandbox df so node_re_profile can do an incremental
+        # refresh against it. node_re_profile clears this back to None.
+        updates["pre_sandbox_df"] = state["working_df"]
         updates["working_df"] = new_df
         updates["clean_df"] = new_df
         updates["latest_error"] = None
@@ -224,8 +228,10 @@ def node_re_profile(state: AgentState):
     """
     Re-profiles cleaned data after a successful sandbox execution.
 
-    Regenerates the profile so the next investigator pass (if one happens)
-    sees the current state of the data.
+    Tries an incremental refresh against the prior dataframe + recipe so we
+    don't pay the full ydata cost on every pass. Falls back to a full
+    generate_profile if the prior state isn't available or if
+    refresh_profile_for_recipe raises.
     """
     pass_num = state.get("pass_count", 0)
     print(f"--- [4.5] Re-Profile (pass: {pass_num}) ---")
@@ -233,15 +239,48 @@ def node_re_profile(state: AgentState):
     target_col = state.get("target_column")
     verbose = os.environ.get("AUTODS_VERBOSE", "").strip().lower()
     is_verbose_enabled = bool(verbose and verbose != "0")
-    if is_verbose_enabled:
-        with redirect_stderr(io.StringIO()):
-            profile = generate_profile(state["working_df"], detailed_profiler=True, target_column=target_col)
+
+    old_df = state.get("pre_sandbox_df")
+    new_df = state["working_df"]
+    recipe = state.get("current_plan")
+    old_profile = state.get("profile")
+
+    def _run_full():
+        if is_verbose_enabled:
+            with redirect_stderr(io.StringIO()):
+                return generate_profile(new_df, detailed_profiler=True, target_column=target_col)
+        return generate_profile(new_df, detailed_profiler=True, target_column=target_col)
+
+    if old_df is None or recipe is None or old_profile is None:
+        profile = _run_full()
     else:
-        profile = generate_profile(state["working_df"], detailed_profiler=True, target_column=target_col)
+        try:
+            if is_verbose_enabled:
+                with redirect_stderr(io.StringIO()):
+                    profile = refresh_profile_for_recipe(
+                        old_profile, old_df, new_df, recipe,
+                        detailed_profiler=True, target_column=target_col,
+                    )
+            else:
+                profile = refresh_profile_for_recipe(
+                    old_profile, old_df, new_df, recipe,
+                    detailed_profiler=True, target_column=target_col,
+                )
+        except Exception as e:
+            log_node(
+                "re_profile",
+                "incremental reprofile failed; falling back to full",
+                error=str(e)[:300],
+            )
+            profile = _run_full()
 
     log_profile_summary(profile)
 
-    return {"profile": profile}
+    return {
+        "profile": profile,
+        # Clear the stash so it doesn't survive into the next pass.
+        "pre_sandbox_df": None,
+    }
 
 
 def node_pass_reset(state: AgentState):

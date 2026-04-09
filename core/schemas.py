@@ -113,38 +113,10 @@ class ColumnProfile(BaseModel):
         description="List of strings flagging issues (e.g., 'High Cardinality', 'Constant Value', 'Possible PII')."
     )
 
-class AlgorithmicQualityScore(BaseModel):
-    """DEPRECATED — retained for backward compatibility.
-
-    Provides a deterministic quality score based on structural metrics.
-    """
-    overall: float = Field(..., description="Weighted composite score 0.0 (unusable) to 1.0 (pristine).")
-    completeness: float = Field(..., description="Average completeness across all columns. Informational only — not weighted in overall score (AutoGluon handles missing features).")
-    target_integrity: Optional[float] = Field(
-        None, description="Target column health: completeness minus penalties for inf/nan/sentinel. "
-                          "None if target_column not specified."
-    )
-    value_plausibility: float = Field(
-        ..., description="Penalizes heaping/template patterns where a single value dominates a numeric column."
-    )
-    structural_integrity: float = Field(
-        ..., description="Fraction of numeric columns free of inf/nan values."
-    )
-    flags: List[str] = Field(
-        default_factory=list,
-        description="Specific issues detected algorithmically (e.g., 'heaping: systolic_bp (120 in 73% of rows)')."
-    )
-
-
-
 # Schema definition for the entire dataset
 class DatasetProfile(BaseModel):
     row_count: int = Field(..., description="Total number of rows in the raw dataset.")
     columns: List[ColumnProfile] = Field(..., description="List of profiles for each column.")
-    algorithmic_quality_score: Optional[AlgorithmicQualityScore] = Field(
-        None, description="Deterministic quality score computed from profile statistics. "
-                          "This is the authoritative quality metric — LLM scores are advisory only."
-    )
 
 
 ################################################################################
@@ -413,6 +385,9 @@ class NullCoOccurrenceInput(BaseModel):
 class CorrelationScanInput(BaseModel):
     target_column: str = Field(..., description="Column to compute correlations against.")
     top_n: int = Field(10, description="Number of top correlated columns to return.")
+
+class GetColumnForensicsInput(BaseModel):
+    column: str = Field(..., description="Exact column name to fetch the full forensic view for.")
 
 class WebSearchInput(BaseModel):
     query: str = Field(..., description="Search query to verify a data quality hypothesis. Be specific — include units, ranges, or domain context.")

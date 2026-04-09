@@ -54,6 +54,13 @@ class AgentState(TypedDict):
     clean_df: Optional[pd.DataFrame]
     model_metadata: Optional[Dict[str, Any]]  # Fixed: was Optional[str] (Issue #21)
 
+    # Ephemeral: the working_df from BEFORE the most recent successful sandbox
+    # run. node_sandbox stashes this so node_re_profile can compute an
+    # incremental refresh against the prior dataframe. node_re_profile clears
+    # it back to None at the end of each pass — it must NOT survive across
+    # passes (the next pass's sandbox will re-stash if needed).
+    pre_sandbox_df: Optional[pd.DataFrame]
+
     # --- Investigator Agent Context ---
     # These messages are ONLY used by the investigator agent and its tool loop.
     # They are not touched by the code generator or answer agent.

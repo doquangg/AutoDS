@@ -28,11 +28,12 @@ from core.schemas import (
     FeatureStep,
     CleaningLogEntry,
 )
-from core.runtime.tools import investigation_tools, set_working_df
+from core.runtime.tools import investigation_tools, set_working_df, set_working_profile
 from core.runtime.sandbox import execute_plan_in_sandbox
 from core.prompts import FE_PLANNER_SYSTEM_PROMPT, FE_CODEGEN_SYSTEM_PROMPT
 from core.logger import log_node, log_llm_request, log_llm_response
-from plugins.profiler import generate_profile
+from plugins.profiler import extend_profile, generate_profile
+from plugins.profile_views import profile_to_llm_json, ProfileViewName
 
 
 MAX_FE_ROUNDS = 3
@@ -48,13 +49,13 @@ def get_fe_codegen_llm():
     return _get_llm(os.environ.get("FE_CODEGEN_MODEL", "gpt-5.4-mini"))
 
 
-def _profile_to_json(profile) -> str:
-    """Serialize a DatasetProfile (dict or pydantic) to a JSON string."""
+def _profile_to_json(profile, view: ProfileViewName = "stats") -> str:
+    """Serialize a DatasetProfile (dict or pydantic) to a JSON string for LLM use."""
     if profile is None:
         return "{}"
     if hasattr(profile, "model_dump"):
-        return json.dumps(profile.model_dump(), indent=2, default=str)
-    return json.dumps(profile, indent=2, default=str)
+        profile = profile.model_dump()
+    return profile_to_llm_json(profile, view)
 
 
 def _summarize_applied(applied_so_far: List[FeatureStep]) -> str:
@@ -82,6 +83,84 @@ def _get_task_type(state: AgentState) -> Optional[str]:
     return None
 
 
+def _summarize_findings(findings) -> str:
+    """
+    Render InvestigationFindings to a compact text block for the FE planner.
+
+    Deliberately narrow: we emit only the fields the planner needs to avoid
+    re-discovering work the Investigator already did.
+
+    - CRITICAL violations: show category + affected columns + a short
+      description. We skip INFO violations because they don't gate FE choices
+      and would inflate the prompt.
+    - Columns marked for drop: names only — the planner should treat them as
+      columns it should not reference in source_columns.
+    - Key caveats: verbatim, capped to the first 5 to keep the prompt tight.
+
+    Returns a stable skeleton even when findings are empty, so the prompt shape
+    is cache-friendly (prompt-caching keys on exact prefix strings).
+    """
+    if findings is None:
+        return "(investigation findings unavailable)"
+
+    # Tolerate both pydantic objects and raw dicts, mirroring _get_task_type.
+    def _attr(obj, name, default):
+        if obj is None:
+            return default
+        if hasattr(obj, name):
+            return getattr(obj, name)
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return default
+
+    violations = _attr(findings, "violations", []) or []
+    critical = [
+        v for v in violations
+        if _attr(v, "severity", "INFO") == "CRITICAL"
+    ]
+
+    columns_to_drop = _attr(findings, "columns_to_drop", []) or []
+    caveats = _attr(findings, "key_caveats", []) or []
+
+    # --- CRITICAL VIOLATIONS ---
+    if critical:
+        critical_lines = []
+        for v in critical:
+            category = _attr(v, "category", "OTHER")
+            affected = _attr(v, "affected_columns", []) or []
+            description = _attr(v, "description", "") or ""
+            # Cap description so a verbose finding can't dominate the prompt.
+            desc_short = description[:160]
+            critical_lines.append(
+                f"  - [{category}] {', '.join(affected)}: {desc_short}"
+            )
+        critical_block = "\n".join(critical_lines)
+    else:
+        critical_block = "  (none)"
+
+    # --- COLUMNS MARKED FOR DROP ---
+    if columns_to_drop:
+        drop_block = "  " + ", ".join(columns_to_drop)
+    else:
+        drop_block = "  (none)"
+
+    # --- KEY CAVEATS ---
+    if caveats:
+        caveat_lines = [f"  - {c[:200]}" for c in caveats[:5]]
+        caveat_block = "\n".join(caveat_lines)
+    else:
+        caveat_block = "  (none)"
+
+    return (
+        "CRITICAL VIOLATIONS (from Investigator):\n"
+        f"{critical_block}\n\n"
+        "COLUMNS MARKED FOR DROP (do not propose features on these):\n"
+        f"{drop_block}\n\n"
+        "KEY CAVEATS:\n"
+        f"{caveat_block}"
+    )
+
+
 def run_fe_planner_agent(
     state: AgentState,
     df,
@@ -100,6 +179,7 @@ def run_fe_planner_agent(
     # Without this call, tools invoked during round 2/3 would inspect the
     # round-0 dataframe and miss columns added by prior rounds.
     set_working_df(df)
+    set_working_profile(profile)
 
     llm = get_fe_planner_llm()
     llm_with_tools = llm.bind_tools(
@@ -112,6 +192,7 @@ def run_fe_planner_agent(
     task_type = _get_task_type(state)
     profile_json = _profile_to_json(profile)
     applied_summary = _summarize_applied(applied_so_far)
+    findings_summary = _summarize_findings(state.get("investigation_findings"))
 
     user_content = (
         f"USER QUERY: {state['user_query']}\n"
@@ -119,6 +200,7 @@ def run_fe_planner_agent(
         f"TASK TYPE: {task_type}\n"
         f"ROUND: {round_num} of {MAX_FE_ROUNDS}\n\n"
         f"FEATURES ALREADY ADDED IN PRIOR ROUNDS:\n{applied_summary}\n\n"
+        f"INVESTIGATION FINDINGS:\n{findings_summary}\n\n"
         f"FORBIDDEN ON RHS OF ANY FEATURE EXPRESSION: {target_col}\n\n"
         f"DATASET PROFILE:\n{profile_json}"
     )
@@ -439,14 +521,35 @@ def node_feature_engineering(state: AgentState) -> Dict[str, Any]:
         # Re-profile so the next round's planner sees the new columns.
         # Skip on the final round since no further planner call will consume it.
         if round_num < MAX_FE_ROUNDS:
+            # FE rounds are strictly additive: every step in recipe.steps creates
+            # a new column named after its FeatureIdea, and the leakage lint plus
+            # codegen prompts forbid mutating existing columns. We can therefore
+            # extend the existing profile with just the newly-added columns
+            # instead of regenerating the whole thing. Falls back to a full
+            # generate_profile if anything looks off.
+            added_cols = [s.new_column for s in recipe.steps]
             try:
-                profile = generate_profile(df, detailed_profiler=False, target_column=target_col)
+                profile = extend_profile(
+                    profile,
+                    df,
+                    added_cols=added_cols,
+                    detailed_profiler=False,
+                    target_column=target_col,
+                )
             except Exception as e:
                 log_node(
                     "feature_engineering",
-                    "re-profile failed; continuing with stale profile",
+                    "extend_profile failed; falling back to full reprofile",
                     error=str(e)[:300],
                 )
+                try:
+                    profile = generate_profile(df, detailed_profiler=False, target_column=target_col)
+                except Exception as e2:
+                    log_node(
+                        "feature_engineering",
+                        "fallback reprofile also failed; continuing with stale profile",
+                        error=str(e2)[:300],
+                    )
 
     return {
         "working_df": df,
