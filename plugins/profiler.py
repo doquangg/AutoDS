@@ -24,16 +24,25 @@ DEFAULT_MAX_METRICS_PER_COL = 20
 
 
 def _safe_float(x: Any) -> float | None:
-    """Convert numpy/pandas scalars to python float; return None if not finite."""
+    """Convert numpy/pandas scalars to python float rounded to 4 significant figures.
+
+    Returns None if the value is not finite. Rounding happens at the source
+    so every downstream consumer (LLMs, disk artifacts, quality checks) sees
+    a compact representation without needing its own rounding pass.
+    """
     if x is None:
         return None
     try:
         val = float(x)
     except Exception:
         return None
-    if math.isfinite(val):
-        return val
-    return None
+    if not math.isfinite(val):
+        return None
+    if val == 0.0:
+        return 0.0
+    # 4 significant figures — keeps skewness like 0.0003421 readable and
+    # strips meaningless trailing precision on values like 123.456789.
+    return float(f"{val:.4g}")
 
 
 def _infer_type(series: pd.Series, s_nonnull: pd.Series | None = None) -> str:
