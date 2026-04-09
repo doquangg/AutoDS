@@ -328,8 +328,8 @@ def run_codegen_agent(state: AgentState) -> Dict[str, Any]:
             else findings,
             indent=2, default=str
         )
-        profile_json = json.dumps(state["profile"], indent=2, default=str)
-        
+        profile_json = profile_to_llm_json(state["profile"], "stats")
+
         messages = [
             SystemMessage(content=CODEGEN_SYSTEM_PROMPT),
             HumanMessage(content=(
