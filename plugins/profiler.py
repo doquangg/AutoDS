@@ -685,3 +685,69 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
     result = profile.model_dump()
 
     return result
+
+
+def extend_profile(
+    existing_profile: Dict[str, Any],
+    new_df: pd.DataFrame,
+    added_cols: List[str],
+    *,
+    detailed_profiler: bool = False,
+    target_column: str | None = None,
+) -> Dict[str, Any]:
+    """
+    Produce a new profile dict for ``new_df`` by reusing all entries from
+    ``existing_profile`` unchanged and computing fresh ColumnProfile entries
+    only for ``added_cols``.
+
+    Preconditions (checked):
+      - every name in ``added_cols`` is present in new_df.columns
+      - every column already in existing_profile is still present in new_df
+      - len(new_df) equals existing_profile['row_count']
+
+    This function is ONLY appropriate when the transformation between the
+    previous df and new_df was strictly additive (new columns added, no
+    existing column mutated, no rows dropped). The caller (currently the
+    feature_engineering round-end reprofile) is responsible for enforcing
+    that contract; if there's any doubt, fall back to generate_profile.
+    """
+    missing = [c for c in added_cols if c not in new_df.columns]
+    if missing:
+        raise KeyError(f"added_cols not in new_df: {missing}")
+
+    existing_row_count = existing_profile.get("row_count", len(new_df))
+    if len(new_df) != existing_row_count:
+        raise ValueError(
+            f"extend_profile expects same row count "
+            f"(existing={existing_row_count}, new={len(new_df)}). "
+            f"Use refresh_profile_for_recipe or generate_profile instead."
+        )
+
+    existing_names = {c["name"] for c in existing_profile["columns"]}
+    for name in existing_names:
+        if name not in new_df.columns:
+            raise ValueError(
+                f"extend_profile expects all existing columns to remain in new_df; "
+                f"missing '{name}'. Use generate_profile instead."
+            )
+
+    # Reuse existing entries verbatim
+    columns = list(existing_profile["columns"])
+
+    # Compute and append new ones (FE rounds never pass ydata through, so
+    # ydata_col_metrics is always None on this path)
+    row_count = int(len(new_df))
+    for name in added_cols:
+        col_profile = profile_one_column(
+            new_df,
+            col_name=name,
+            row_count=row_count,
+            detailed_profiler=detailed_profiler,
+            ydata_col_metrics=None,
+        )
+        columns.append(col_profile.model_dump())
+
+    out = dict(existing_profile)
+    out["row_count"] = row_count
+    out["columns"] = columns
+    return out
