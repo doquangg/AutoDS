@@ -190,6 +190,7 @@ def run_fe_planner_agent(
     task_type = _get_task_type(state)
     profile_json = _profile_to_json(profile)
     applied_summary = _summarize_applied(applied_so_far)
+    findings_summary = _summarize_findings(state.get("investigation_findings"))
 
     user_content = (
         f"USER QUERY: {state['user_query']}\n"
@@ -197,6 +198,7 @@ def run_fe_planner_agent(
         f"TASK TYPE: {task_type}\n"
         f"ROUND: {round_num} of {MAX_FE_ROUNDS}\n\n"
         f"FEATURES ALREADY ADDED IN PRIOR ROUNDS:\n{applied_summary}\n\n"
+        f"INVESTIGATION FINDINGS:\n{findings_summary}\n\n"
         f"FORBIDDEN ON RHS OF ANY FEATURE EXPRESSION: {target_col}\n\n"
         f"DATASET PROFILE:\n{profile_json}"
     )
