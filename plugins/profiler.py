@@ -412,6 +412,213 @@ def compute_anomaly_summary(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 
+def profile_one_column(
+    df: pd.DataFrame,
+    col_name: str,
+    *,
+    row_count: int,
+    detailed_profiler: bool,
+    ydata_col_metrics: Dict[str, Any] | None,
+) -> ColumnProfile:
+    """
+    Compute a ColumnProfile for exactly one column of ``df``.
+
+    This is the per-column body of generate_profile, factored out so callers
+    that already have a previous profile can recompute only the columns that
+    actually changed (see extend_profile / refresh_profile_for_recipe).
+
+    Pure function: given the same inputs, must return the same ColumnProfile
+    that generate_profile would produce for the same column on the same data.
+    Global ydata bootstrap warnings (ydata_fallback_to_baseline,
+    ydata_skipped_wide_table) live in generate_profile, NOT here, because
+    they apply to the whole-dataframe ydata run rather than to any one column.
+    """
+    col = col_name
+    series = df[col]
+    s_nonnull = series.dropna()  # compute once; passed to all helpers below
+    non_null = len(s_nonnull)
+    completeness = (non_null / row_count) if row_count > 0 else 0.0
+    try:
+        unique_count = int(series.nunique(dropna=True))
+    except TypeError:
+        # Handle unhashable objects (e.g., dict/list) by counting uniques on JSON-safe strings
+        unique_count = int(s_nonnull.map(_to_json_safe).astype(str).nunique())
+
+    unique_factor = (unique_count / row_count) if row_count > 0 else 0.0
+
+    inferred_type = _infer_type(series, s_nonnull=s_nonnull)
+
+    # ------------------------------------------------------------------
+    # Optional profiler signals (optional / non-breaking)
+    # ------------------------------------------------------------------
+    actual_dtype = str(series.dtype)
+
+    # Strong TYPE_ERROR hint: inferred Numeric/Datetime but stored as object/string
+    type_mismatch = bool(
+        inferred_type in ("Numeric", "Datetime")
+        and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series))
+    )
+
+    # Random sample values (more representative than top-5 frequent)
+    random_sample_values = None
+    if non_null > 0:
+        try:
+            random_sample_values = [
+                _to_json_safe(v)
+                for v in s_nonnull.sample(n=min(5, non_null), random_state=42).tolist()
+            ]
+        except Exception:
+            random_sample_values = [_to_json_safe(v) for v in s_nonnull.head(5).tolist()]
+
+    # Coercion failures (count + sample bad values)
+    coercion_failure_count = None
+    coercion_failure_samples = None
+
+    # Percentiles for numeric columns (IQR reasoning)
+    q1 = None
+    q3 = None
+
+    # Datetime competing format samples
+    datetime_format_samples = None
+
+    min_value = max_value = mean = skewness = None
+
+    median = None
+    zero_count = None
+    negative_count = None
+    inf_nan_count = None
+
+    earliest_date = None
+    latest_date = None
+    datetime_format_consistency = None
+
+    regex_format_consistency = None
+    dominant_pattern = None
+
+    s_num_clean: pd.Series | None = None
+    if inferred_type == "Numeric":
+        s_num = pd.to_numeric(series, errors="coerce")
+        original_nan = row_count - non_null
+        inf_values = int(np.isinf(s_num).sum()) if len(s_num) else 0
+        s_num = s_num.replace([np.inf, -np.inf], np.nan)
+        if s_num.notna().any():
+            min_value = _safe_float(s_num.min())
+            max_value = _safe_float(s_num.max())
+            mean = _safe_float(s_num.mean())
+            skewness = _safe_float(s_num.skew())
+
+            median = _safe_float(s_num.median())
+
+        # Counts (computed even if all NaN after coercion)
+        zero_count = int((s_num == 0).sum()) if len(s_num) else 0
+        negative_count = int((s_num < 0).sum()) if len(s_num) else 0
+        # Count only inf values and coercion failures, NOT natural missing data.
+        # AutoGluon handles NaN natively, so natural missingness is not a defect.
+        coercion_failures = int(s_num.isna().sum()) - original_nan - inf_values
+        # Percentiles (Q1/Q3) for numeric columns
+        if s_num.notna().any():
+            q1 = _safe_float(s_num.quantile(0.25))
+            q3 = _safe_float(s_num.quantile(0.75))
+
+        # Coercion failures: count + sample raw values
+        coercion_failure_count = int(coercion_failures)
+        try:
+            coerced_nonnull = pd.to_numeric(s_nonnull, errors="coerce")
+            bad_mask = coerced_nonnull.isna()
+            if bad_mask.any():
+                coercion_failure_samples = (
+                    s_nonnull[bad_mask].astype(str).drop_duplicates().head(5).tolist()
+                )
+            else:
+                coercion_failure_samples = []
+        except Exception:
+            coercion_failure_samples = []
+        assert coercion_failures >= 0, (
+            f"Column '{col}': negative coercion_failures={coercion_failures} "
+            f"(isna={int(s_num.isna().sum())}, original_nan={original_nan}, inf={inf_values})"
+        )
+        inf_nan_count = inf_values + coercion_failures
+        s_num_clean = s_num.dropna()  # precomputed for _semantic_warnings
+
+    top_vals = _top_frequent_values(series, k=5, s_nonnull=s_nonnull)
+
+    future_date_count = None
+    if inferred_type == "Datetime":
+        datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
+        future_date_count = _count_future_dates(s_nonnull)
+
+        # Datetime: sample competing raw formats
+        if non_null > 0:
+            dt_strings = s_nonnull.astype(str)
+            try:
+                datetime_format_samples = (
+                    dt_strings.sample(n=min(5, len(dt_strings)), random_state=42)
+                    .drop_duplicates()
+                    .head(5)
+                    .tolist()
+                )
+            except Exception:
+                datetime_format_samples = dt_strings.drop_duplicates().head(5).tolist()
+
+            # coercion failures for datetime parsing (count + samples)
+            try:
+                try:
+                    parsed = pd.to_datetime(dt_strings.head(200), errors="coerce", format="mixed")
+                except TypeError:
+                    # Older pandas fallback (no format="mixed")
+                    parsed = pd.to_datetime(dt_strings.head(200), errors="coerce")
+                bad_mask = parsed.isna()
+                coercion_failure_count = int(bad_mask.sum())
+                if bad_mask.any():
+                    coercion_failure_samples = (
+                        dt_strings.head(200)[bad_mask].drop_duplicates().head(5).tolist()
+                    )
+                else:
+                    coercion_failure_samples = []
+            except Exception:
+                coercion_failure_count = None
+                coercion_failure_samples = None
+
+    # Regex/pattern consistency for string/categorical-like columns
+    if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
+        regex_format_consistency, dominant_pattern = _regex_consistency(series)
+    issues = _semantic_warnings(series, inferred_type, unique_factor, s_nonnull=s_nonnull, s_num_clean=s_num_clean, future_date_count=future_date_count)
+
+    return ColumnProfile(
+        name=str(col),
+        inferred_type=inferred_type,
+        completeness=float(completeness),
+        unique_factor=float(unique_factor),
+        min_value=min_value,
+        max_value=max_value,
+        mean=mean,
+        skewness=skewness,
+        median=median,
+        zero_count=zero_count,
+        negative_count=negative_count,
+        inf_nan_count=inf_nan_count,
+        earliest_date=earliest_date,
+        latest_date=latest_date,
+        datetime_format_consistency=datetime_format_consistency,
+        future_date_count=future_date_count,
+        regex_format_consistency=regex_format_consistency,
+        dominant_pattern=dominant_pattern,
+        ydata_metrics=ydata_col_metrics if detailed_profiler else None,
+
+        # Optional profiler additions (all optional)
+        actual_dtype=actual_dtype,
+        type_mismatch=type_mismatch,
+        coercion_failure_count=coercion_failure_count,
+        coercion_failure_samples=coercion_failure_samples,
+        random_sample_values=random_sample_values,
+        q1=q1,
+        q3=q3,
+        datetime_format_samples=datetime_format_samples,
+        top_frequent_values=top_vals,
+        semantic_warnings=issues,
+    )
+
+
 def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_column: str | None = None) -> Dict[str, Any]:
     """
     Generate a DatasetProfile-compatible dict for the given dataframe.
@@ -455,196 +662,23 @@ def generate_profile(df: pd.DataFrame, detailed_profiler: bool = False, target_c
     columns: List[ColumnProfile] = []
 
     for col in df.columns:
-        series = df[col]
-        s_nonnull = series.dropna()  # compute once; passed to all helpers below
-        non_null = len(s_nonnull)
-        completeness = (non_null / row_count) if row_count > 0 else 0.0
-        try:
-            unique_count = int(series.nunique(dropna=True))
-        except TypeError:
-            # Handle unhashable objects (e.g., dict/list) by counting uniques on JSON-safe strings
-            unique_count = int(s_nonnull.map(_to_json_safe).astype(str).nunique())
-
-        unique_factor = (unique_count / row_count) if row_count > 0 else 0.0
-
-        inferred_type = _infer_type(series, s_nonnull=s_nonnull)
-
-        # ------------------------------------------------------------------
-        # Optional profiler signals (optional / non-breaking)
-        # ------------------------------------------------------------------
-        actual_dtype = str(series.dtype)
-
-        # Strong TYPE_ERROR hint: inferred Numeric/Datetime but stored as object/string
-        type_mismatch = bool(
-            inferred_type in ("Numeric", "Datetime")
-            and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series))
+        col_profile = profile_one_column(
+            df,
+            col_name=str(col),
+            row_count=row_count,
+            detailed_profiler=detailed_profiler,
+            ydata_col_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
         )
-
-        # Random sample values (more representative than top-5 frequent)
-        random_sample_values = None
-        if non_null > 0:
-            try:
-                random_sample_values = [
-                    _to_json_safe(v)
-                    for v in s_nonnull.sample(n=min(5, non_null), random_state=42).tolist()
-                ]
-            except Exception:
-                random_sample_values = [_to_json_safe(v) for v in s_nonnull.head(5).tolist()]
-
-        # Coercion failures (count + sample bad values)
-        coercion_failure_count = None
-        coercion_failure_samples = None
-
-        # Percentiles for numeric columns (IQR reasoning)
-        q1 = None
-        q3 = None
-
-        # Datetime competing format samples
-        datetime_format_samples = None
-
-        min_value = max_value = mean = skewness = None
-
-        median = None
-        zero_count = None
-        negative_count = None
-        inf_nan_count = None
-
-        earliest_date = None
-        latest_date = None
-        datetime_format_consistency = None
-
-        regex_format_consistency = None
-        dominant_pattern = None
-
-        s_num_clean: pd.Series | None = None
-        if inferred_type == "Numeric":
-            s_num = pd.to_numeric(series, errors="coerce")
-            original_nan = row_count - non_null
-            inf_values = int(np.isinf(s_num).sum()) if len(s_num) else 0
-            s_num = s_num.replace([np.inf, -np.inf], np.nan)
-            if s_num.notna().any():
-                min_value = _safe_float(s_num.min())
-                max_value = _safe_float(s_num.max())
-                mean = _safe_float(s_num.mean())
-                skewness = _safe_float(s_num.skew())
-
-                median = _safe_float(s_num.median())
-
-            # Counts (computed even if all NaN after coercion)
-            zero_count = int((s_num == 0).sum()) if len(s_num) else 0
-            negative_count = int((s_num < 0).sum()) if len(s_num) else 0
-            # Count only inf values and coercion failures, NOT natural missing data.
-            # AutoGluon handles NaN natively, so natural missingness is not a defect.
-            coercion_failures = int(s_num.isna().sum()) - original_nan - inf_values
-            # Percentiles (Q1/Q3) for numeric columns
-            if s_num.notna().any():
-                q1 = _safe_float(s_num.quantile(0.25))
-                q3 = _safe_float(s_num.quantile(0.75))
-
-            # Coercion failures: count + sample raw values
-            coercion_failure_count = int(coercion_failures)
-            try:
-                coerced_nonnull = pd.to_numeric(s_nonnull, errors="coerce")
-                bad_mask = coerced_nonnull.isna()
-                if bad_mask.any():
-                    coercion_failure_samples = (
-                        s_nonnull[bad_mask].astype(str).drop_duplicates().head(5).tolist()
-                    )
-                else:
-                    coercion_failure_samples = []
-            except Exception:
-                coercion_failure_samples = []
-            assert coercion_failures >= 0, (
-                f"Column '{col}': negative coercion_failures={coercion_failures} "
-                f"(isna={int(s_num.isna().sum())}, original_nan={original_nan}, inf={inf_values})"
-            )
-            inf_nan_count = inf_values + coercion_failures
-            s_num_clean = s_num.dropna()  # precomputed for _semantic_warnings
-
-        top_vals = _top_frequent_values(series, k=5, s_nonnull=s_nonnull)
-
-        future_date_count = None
-        if inferred_type == "Datetime":
-            datetime_format_consistency, earliest_date, latest_date = _datetime_consistency(series)
-            future_date_count = _count_future_dates(s_nonnull)
-
-            # Datetime: sample competing raw formats
-            if non_null > 0:
-                dt_strings = s_nonnull.astype(str)
-                try:
-                    datetime_format_samples = (
-                        dt_strings.sample(n=min(5, len(dt_strings)), random_state=42)
-                        .drop_duplicates()
-                        .head(5)
-                        .tolist()
-                    )
-                except Exception:
-                    datetime_format_samples = dt_strings.drop_duplicates().head(5).tolist()
-
-                # coercion failures for datetime parsing (count + samples)
-                try:
-                    try:
-                        parsed = pd.to_datetime(dt_strings.head(200), errors="coerce", format="mixed")
-                    except TypeError:
-                        # Older pandas fallback (no format="mixed")
-                        parsed = pd.to_datetime(dt_strings.head(200), errors="coerce")
-                    bad_mask = parsed.isna()
-                    coercion_failure_count = int(bad_mask.sum())
-                    if bad_mask.any():
-                        coercion_failure_samples = (
-                            dt_strings.head(200)[bad_mask].drop_duplicates().head(5).tolist()
-                        )
-                    else:
-                        coercion_failure_samples = []
-                except Exception:
-                    coercion_failure_count = None
-                    coercion_failure_samples = None
-
-        # Regex/pattern consistency for string/categorical-like columns
-        if inferred_type == "Categorical" and (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
-            regex_format_consistency, dominant_pattern = _regex_consistency(series)
-        issues = _semantic_warnings(series, inferred_type, unique_factor, s_nonnull=s_nonnull, s_num_clean=s_num_clean, future_date_count=future_date_count)
         if detailed_profiler:
+            # Global ydata-bootstrap warnings: applied per-column for backward
+            # compatibility, but they describe the whole-dataframe ydata run,
+            # not anything column-specific. Keeping them out of profile_one_column
+            # so it can stay a pure per-column function.
             if ydata_error:
-                issues.append("ydata_fallback_to_baseline")
+                col_profile.semantic_warnings.append("ydata_fallback_to_baseline")
             elif ydata_skipped == "wide_table":
-                issues.append("ydata_skipped_wide_table")
-
-        columns.append(
-            ColumnProfile(
-                name=str(col),
-                inferred_type=inferred_type,
-                completeness=float(completeness),
-                unique_factor=float(unique_factor),
-                min_value=min_value,
-                max_value=max_value,
-                mean=mean,
-                skewness=skewness,
-                median=median,
-                zero_count=zero_count,
-                negative_count=negative_count,
-                inf_nan_count=inf_nan_count,
-                earliest_date=earliest_date,
-                latest_date=latest_date,
-                datetime_format_consistency=datetime_format_consistency,
-                future_date_count=future_date_count,
-                regex_format_consistency=regex_format_consistency,
-                dominant_pattern=dominant_pattern,
-                ydata_metrics=ydata_by_col.get(str(col)) if detailed_profiler else None,
-
-                # Optional profiler additions (all optional)
-                actual_dtype=actual_dtype,
-                type_mismatch=type_mismatch,
-                coercion_failure_count=coercion_failure_count,
-                coercion_failure_samples=coercion_failure_samples,
-                random_sample_values=random_sample_values,
-                q1=q1,
-                q3=q3,
-                datetime_format_samples=datetime_format_samples,
-                top_frequent_values=top_vals,
-                semantic_warnings=issues,
-            )
-        )
+                col_profile.semantic_warnings.append("ydata_skipped_wide_table")
+        columns.append(col_profile)
 
     profile = DatasetProfile(row_count=row_count, columns=columns)
     # Return plain dict for JSON serialization
