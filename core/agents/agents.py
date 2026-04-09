@@ -42,6 +42,7 @@ from langchain_openai import ChatOpenAI
 from core.pipeline.state import AgentState
 from core.schemas import InvestigationFindings, CleaningRecipe
 from core.runtime.tools import investigation_tools
+from plugins.profile_views import profile_to_llm_json
 from core.logger import (
     log_llm_request, log_llm_response, log_investigation_findings,
     log_cleaning_recipe,
@@ -186,7 +187,7 @@ def run_investigator_agent(state: AgentState, max_tool_calls: int = 30) -> Dict[
 
     # On first call (no messages yet), inject the system prompt and profile
     if not messages:
-        profile_json = json.dumps(state["profile"], indent=2, default=str)
+        profile_json = profile_to_llm_json(state["profile"], "forensic")
         pass_count = state.get("pass_count", 0)
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
