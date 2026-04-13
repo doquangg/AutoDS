@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Replaced at runtime when served by FastAPI (see web/main.py). For Live Preview only, paste your API URL here manually. -->
+  <meta name="autods-api-base" content="__AUTODS_API_BASE__" />
+  <title>AutoDS</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="header">
+    <h1>AutoDS</h1>
+    <p class="tagline">Interactive flow: profile your data, pick a target, then watch the pipeline run.</p>
+  </header>
+
+  <nav class="steps" aria-label="Progress">
+    <div class="step active" data-step="1"><span class="step-num">1</span> Data &amp; question</div>
+    <div class="step" data-step="2"><span class="step-num">2</span> Target column</div>
+    <div class="step" data-step="3"><span class="step-num">3</span> Run &amp; results</div>
+  </nav>
+
+  <main class="main">
+    <!-- Step 1 -->
+    <section class="card step-panel" data-panel="1">
+      <h2>1. Your question and data</h2>
+      <form id="form-step1">
+        <label class="field">
+          <span>Your question</span>
+          <textarea name="user_query" rows="3" required
+            placeholder="e.g. What patterns predict high hospital bills?">What patterns in patient visits predict high-cost outcomes?</textarea>
+        </label>
+
+        <label class="check">
+          <input type="checkbox" name="use_sample" id="use_sample" checked />
+          <span>Use bundled sample healthcare CSV</span>
+        </label>
+
+        <label class="field" id="upload-wrap">
+          <span>Or upload CSV</span>
+          <input type="file" name="file" id="file" accept=".csv,text/csv" />
+        </label>
+
+        <p class="hint">We profile the dataset and ask the model to suggest good prediction targets.</p>
+        <button type="submit" class="btn" id="btn-prepare">Analyze data &amp; suggest targets</button>
+      </form>
+    </section>
+
+    <!-- Step 2 -->
+    <section class="card step-panel hidden" data-panel="2">
+      <h2>2. Choose target column</h2>
+      <p class="hint" id="prepare-summary"></p>
+      <div id="suggestions" class="suggestions"></div>
+      <label class="field">
+        <span>Target column (click a suggestion or pick from list)</span>
+        <select id="target_select" name="target_column"></select>
+      </label>
+      <label class="field">
+        <span>Or type exact column name</span>
+        <input type="text" id="target_custom" placeholder="Custom column name" />
+      </label>
+      <div class="btn-row">
+        <button type="button" class="btn secondary" id="btn-back-2">Back</button>
+        <button type="button" class="btn" id="btn-run">Run full pipeline</button>
+      </div>
+    </section>
+
+    <!-- Step 3 -->
+    <section class="card step-panel hidden" data-panel="3">
+      <h2>3. Pipeline</h2>
+      <div class="live-status">
+        <span class="pulse" id="pulse" aria-hidden="true"></span>
+        <span id="live-msg">Starting…</span>
+      </div>
+      <label class="field">
+        <span>Live log</span>
+        <pre id="live-log" class="log live-log"></pre>
+      </label>
+      <div class="btn-row">
+        <button type="button" class="btn secondary hidden" id="btn-back-3">Start over</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="error-card">
+      <h2>Error</h2>
+      <pre id="error-body" class="log"></pre>
+    </section>
+
+    <section class="card hidden" id="answer-card">
+      <h2>Final answer</h2>
+      <div id="answer-body" class="answer"></div>
+    </section>
+
+    <section class="card hidden" id="json-card">
+      <h2>Structured result</h2>
+      <pre id="json-body" class="log json"></pre>
+    </section>
+
+    <section class="card hidden" id="csv-card">
+      <h2>Cleaned data</h2>
+      <p><a id="csv-download" class="btn secondary" href="#" download="cleaned_data.csv">Download CSV</a></p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Set <code>OPENAI_API_KEY</code> on the server, then run <code>python scripts\run_web.py</code> and open <strong>http://127.0.0.1:8000</strong> (same host as the API).</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
