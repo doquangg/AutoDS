@@ -18,9 +18,9 @@
 # LLM CONFIGURATION:
 #   All agents use OpenAI's API. Set OPENAI_API_KEY in your environment.
 #   Model defaults can be overridden per-role via environment variables:
-#     INVESTIGATOR_MODEL  (default: gpt-5-2025-08-07)
-#     CODEGEN_MODEL       (default: gpt-4.1-2025-04-14)
-#     ANSWER_MODEL        (default: gpt-4.1-2025-04-14)
+#     INVESTIGATOR_MODEL  (default: gpt-5.4)
+#     CODEGEN_MODEL       (default: gpt-5.4-mini)
+#     ANSWER_MODEL        (default: gpt-5.4-mini)
 #
 #   To use a local OpenAI-compatible server (Ollama, vLLM, etc.), also set:
 #     OPENAI_API_BASE=http://localhost:8000/v1

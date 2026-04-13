@@ -114,10 +114,7 @@ class ColumnProfile(BaseModel):
     )
 
 class AlgorithmicQualityScore(BaseModel):
-    """DEPRECATED — retained for backward compatibility.
-
-    Provides a deterministic quality score based on structural metrics.
-    """
+    """Deterministic quality score based on structural metrics."""
     overall: float = Field(..., description="Weighted composite score 0.0 (unusable) to 1.0 (pristine).")
     completeness: float = Field(..., description="Average completeness across all columns. Informational only — not weighted in overall score (AutoGluon handles missing features).")
     target_integrity: Optional[float] = Field(
