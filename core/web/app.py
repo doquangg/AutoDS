@@ -162,25 +162,40 @@ def create_app(graph_app: Optional[Any] = None) -> FastAPI:
                     last_yielded = max(last_yielded, ev.get("seq", 0))
 
             # Live stream. sse-starlette handles keepalive pings via the
-            # ping= parameter below; we don't need our own heartbeat.
+            # ping= parameter below.
+            #
+            # IMPORTANT: we do NOT close the stream on PIPELINE_COMPLETE or
+            # PIPELINE_FAILED. After the pipeline finishes, the user may
+            # ask follow-up questions via POST /ask, and the Q&A task
+            # emits its events (QA_TOKEN / QA_COMPLETE / QA_ERROR) onto
+            # this same queue. Closing here means those events have no
+            # reader; EventSource auto-reconnect is unreliable in practice
+            # (tab backgrounding, server close semantics, etc), and the
+            # whole design is simpler if there's one long-lived connection
+            # per session that only terminates when the client disconnects.
             while True:
                 if await request.is_disconnected():
+                    print(
+                        f"[events] session={sid} client disconnected, "
+                        f"closing stream (last_yielded={last_yielded})",
+                        flush=True,
+                    )
                     return
                 ev = await s.queue.get()
                 # Skip anything already delivered via replay.
                 if ev.get("seq", 0) <= last_yielded:
                     continue
+                print(
+                    f"[events] session={sid} yield seq={ev.get('seq')} "
+                    f"type={ev.get('type')}",
+                    flush=True,
+                )
                 yield {
                     "event": "message",
                     "id": str(ev.get("seq", 0)),
                     "data": json.dumps(ev, default=str),
                 }
                 last_yielded = ev.get("seq", 0)
-                if ev.get("type") in {
-                    EventTypes.PIPELINE_COMPLETE,
-                    EventTypes.PIPELINE_FAILED,
-                }:
-                    return
 
         return EventSourceResponse(event_generator(), ping=15)
 

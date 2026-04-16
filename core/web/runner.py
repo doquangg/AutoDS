@@ -204,11 +204,7 @@ class PipelineRunner:
     async def _emit(self, fields: dict) -> None:
         """Build, buffer, and enqueue an event through the shared session."""
         ev_type = fields.pop("type")
-        ev = await self.session.emit(ev_type, **fields)
-        # Mirror to stderr so server logs show the event stream — invaluable
-        # when something hangs mid-run.
-        summary = {k: v for k, v in ev.items() if k not in {"ts", "seq"}}
-        print(f"[web runner] emit seq={ev['seq']} {summary}", flush=True)
+        await self.session.emit(ev_type, **fields)
 
     def _build_artifacts(self, state: dict) -> dict:
         """Extract the bits the Q&A agent needs."""

@@ -65,6 +65,21 @@ class Session:
         ev = build_event(event_type, self.seq_counter, **fields)
         self.record_event(ev)
         await self.queue.put(ev)
+        # Diagnostic: mirror every session-level emit to stderr. Keeps QA
+        # events (which don't go through the runner's own print) visible
+        # in the same log stream.
+        preview = {
+            k: (
+                v if not isinstance(v, str) or len(v) < 80
+                else v[:80] + "…"
+            )
+            for k, v in ev.items()
+            if k not in {"ts", "seq"}
+        }
+        print(
+            f"[session {self.id[:8]}] emit seq={ev['seq']} qsize={self.queue.qsize()} {preview}",
+            flush=True,
+        )
         return ev
 
     def replay_since(self, last_seq: int):
