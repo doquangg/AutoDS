@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import { UserMessage } from "./UserMessage";
 import { StepCard } from "./StepCard";
+import { TargetSelectionPrompt } from "./TargetSelectionPrompt";
 
 export function ChatThread() {
   const { userQuery, dataset, steps, finalAnswerTokens, qaMessages } =
@@ -22,6 +23,7 @@ export function ChatThread() {
           )}
         </div>
       )}
+      <TargetSelectionPrompt />
       {qaMessages.map((m, i) =>
         m.role === "user" ? (
           <UserMessage key={i} text={m.text} />
