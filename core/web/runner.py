@@ -61,7 +61,17 @@ class PipelineRunner:
             })
             self.session.status = "running"
 
-            config = {"configurable": {"thread_id": self.session.id}}
+            # recursion_limit caps how many super-steps LangGraph will run.
+            # Worst case here is ~234: MAX_PASSES (5) × (1 investigator +
+            # MAX_TOOL_CALLS (20) tool loops + ~5 other nodes) + profiler +
+            # target_selector + fe + autogluon + answer. 500 gives headroom
+            # without hiding a real infinite loop. The CLI (app.invoke) uses
+            # the default 25 because it happens not to exercise the worst
+            # case, but the web path should be robust.
+            config = {
+                "configurable": {"thread_id": self.session.id},
+                "recursion_limit": 500,
+            }
             await self._stream_until_done(initial_state, config)
 
             # Capture artifacts from final state
