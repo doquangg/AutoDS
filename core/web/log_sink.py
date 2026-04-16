@@ -42,15 +42,20 @@ class QueueLogHandler(logging.Handler):
         seq:      monotonic seq counter for this session
         loop:     event loop on which the queue lives (records may arrive
                   from worker threads, so we use call_soon_threadsafe)
+        record_to: optional callable invoked with the event dict before it is
+                  placed on the queue. The runner passes session.record_event
+                  here so events also land in the replay ring buffer.
     """
 
     def __init__(self, queue: asyncio.Queue, seq: SeqCounter,
-                 loop: asyncio.AbstractEventLoop):
+                 loop: asyncio.AbstractEventLoop,
+                 record_to=None):
         super().__init__()
         self.setLevel(logging.DEBUG)
         self._queue = queue
         self._seq = seq
         self._loop = loop
+        self._record_to = record_to
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -62,6 +67,11 @@ class QueueLogHandler(logging.Handler):
                 level=record.levelname,
                 message=f"[log_sink translation failed] {record.getMessage()}",
             )
+        if self._record_to is not None:
+            try:
+                self._record_to(event)
+            except Exception:
+                pass
         self._loop.call_soon_threadsafe(self._queue.put_nowait, event)
 
     # ------------------------------------------------------------------
