@@ -137,7 +137,10 @@ def create_app(graph_app: Optional[Any] = None) -> FastAPI:
         )
 
         async def event_generator():
-            # Replay buffered events past last_seq first
+            # Replay buffered events past last_seq first. The ring buffer is
+            # the single source of truth for past events; the queue is the
+            # live stream. After replay we drain any queue entries already
+            # covered by the buffer so the client doesn't see duplicates.
             replay = s.replay_since(last_seq)
             if replay == "truncated":
                 yield {
@@ -147,34 +150,39 @@ def create_app(graph_app: Optional[Any] = None) -> FastAPI:
                         {"type": EventTypes.REPLAY_TRUNCATED}
                     ),
                 }
+                last_yielded = 0
             else:
+                last_yielded = last_seq
                 for ev in replay:
                     yield {
                         "event": "message",
                         "id": str(ev.get("seq", 0)),
                         "data": json.dumps(ev, default=str),
                     }
-            # Then stream live
+                    last_yielded = max(last_yielded, ev.get("seq", 0))
+
+            # Live stream. sse-starlette handles keepalive pings via the
+            # ping= parameter below; we don't need our own heartbeat.
             while True:
                 if await request.is_disconnected():
                     return
-                try:
-                    ev = await asyncio.wait_for(s.queue.get(), timeout=15.0)
-                    yield {
-                        "event": "message",
-                        "id": str(ev.get("seq", 0)),
-                        "data": json.dumps(ev, default=str),
-                    }
-                    if ev.get("type") in {
-                        EventTypes.PIPELINE_COMPLETE,
-                        EventTypes.PIPELINE_FAILED,
-                    }:
-                        return
-                except asyncio.TimeoutError:
-                    # Heartbeat
-                    yield {"event": "ping", "data": ""}
+                ev = await s.queue.get()
+                # Skip anything already delivered via replay.
+                if ev.get("seq", 0) <= last_yielded:
+                    continue
+                yield {
+                    "event": "message",
+                    "id": str(ev.get("seq", 0)),
+                    "data": json.dumps(ev, default=str),
+                }
+                last_yielded = ev.get("seq", 0)
+                if ev.get("type") in {
+                    EventTypes.PIPELINE_COMPLETE,
+                    EventTypes.PIPELINE_FAILED,
+                }:
+                    return
 
-        return EventSourceResponse(event_generator())
+        return EventSourceResponse(event_generator(), ping=15)
 
     @app.post("/sessions/{sid}/ask")
     async def ask_followup(sid: str, body: dict, request: Request):

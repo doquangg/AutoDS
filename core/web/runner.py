@@ -185,6 +185,10 @@ class PipelineRunner:
         ev = build_event(ev_type, self.seq, **fields)
         self.session.record_event(ev)
         await self.session.queue.put(ev)
+        # Mirror to stderr so server logs show the event stream — invaluable
+        # when something hangs mid-run.
+        summary = {k: v for k, v in ev.items() if k not in {"ts", "seq"}}
+        print(f"[web runner] emit seq={ev['seq']} {summary}", flush=True)
 
     def _build_artifacts(self, state: dict) -> dict:
         """Extract the bits the Q&A agent needs."""
