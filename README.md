@@ -173,6 +173,44 @@ python scripts/run_graph_orcheval.py
 
 Outputs are saved to `output/orcheval_trace.json` and `output/orcheval_report.json`.
 
+## Web Demo
+
+Run AutoDS as a chat-style web app. Local single-user only.
+
+### Prerequisites
+- Python env: `conda env create -f env.yml` (and `conda activate AutoDS`)
+- Node.js 18+ and npm
+- `OPENAI_API_KEY` exported
+
+### Dev mode (hot-reload UI)
+
+Terminal 1 — backend:
+```bash
+python scripts/run_web.py
+```
+
+Terminal 2 — frontend:
+```bash
+cd web && npm install && npm run dev
+```
+
+Open http://localhost:5173
+
+### Production-ish mode (single port)
+
+```bash
+cd web && npm install && npm run build && cd ..
+python scripts/run_web.py
+```
+
+Open http://localhost:8000
+
+### What you can do
+- Drag a CSV onto the chat input, type a question, hit send.
+- Watch each pipeline step stream in with status icons; click any step to see the LLM's reasoning, tool calls, and routing decisions.
+- When asked, click a target-column candidate to unblock the pipeline.
+- After the run finishes, ask follow-up questions like *"why did you drop column X?"* — answered by a Q&A agent grounded in the run's artifacts.
+
 ## Benchmarking
 
 AutoDS includes a benchmark harness that evaluates the pipeline end-to-end against UCI datasets with published baselines:
