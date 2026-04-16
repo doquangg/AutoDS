@@ -76,7 +76,20 @@ class PipelineRunner:
 
             # Capture artifacts from final state
             final = await self.graph_app.aget_state(config)
-            self.session.artifacts = self._build_artifacts(final.values)
+            artifacts = self._build_artifacts(final.values)
+            self.session.artifacts = artifacts
+
+            # The answer_agent stores its result in state (answer/final_answer)
+            # rather than streaming tokens through astream_events, so no
+            # final_answer_token events were emitted during the run. Emit one
+            # now with the full text so the frontend's accumulator can render
+            # it as part of the pipeline response card.
+            if artifacts.get("final_answer"):
+                await self._emit({
+                    "type": EventTypes.FINAL_ANSWER_TOKEN,
+                    "text": artifacts["final_answer"],
+                })
+
             self.session.status = "complete"
             await self._emit({
                 "type": EventTypes.PIPELINE_COMPLETE,
@@ -219,6 +232,10 @@ class PipelineRunner:
                 s.model_dump() if hasattr(s, "model_dump") else s
                 for s in state.get("applied_fe_steps", [])
             ],
+            # Pipeline activity log — gives the Q&A agent insight into the
+            # moment-to-moment decisions (what tools it called, how the
+            # router branched, free-text log messages).
+            "activity_log": self._build_activity_log(),
             "model_metadata": state.get("model_metadata"),
             "final_answer": state.get("final_answer") or state.get("answer"),
         }
@@ -233,3 +250,68 @@ class PipelineRunner:
                 else None
             ),
         }
+
+    # ------------------------------------------------------------------
+    # Activity log projection
+    # ------------------------------------------------------------------
+    # Event types worth showing to the Q&A agent. We skip heartbeats,
+    # duplicate lifecycle chatter, and node lifecycle (the artifacts already
+    # summarize what each node did structurally).
+    _QA_LOG_TYPES = frozenset({
+        EventTypes.ROUTE_DECISION,
+        EventTypes.TOOL_CALL,
+        EventTypes.INVESTIGATION_FINDINGS,
+        EventTypes.CLEANING_RECIPE,
+        EventTypes.PROFILE_SUMMARY,
+        EventTypes.MODEL_METADATA,
+        EventTypes.LOG,
+        EventTypes.NODE_STARTED,
+        EventTypes.NODE_COMPLETED,
+        EventTypes.TARGET_SELECTION_RESOLVED,
+    })
+
+    def _build_activity_log(self) -> list[dict]:
+        """
+        Compact, serializable projection of the session's event stream for
+        the Q&A agent. Trims heavy payloads so the LLM context doesn't
+        balloon on long runs.
+        """
+        out: list[dict] = []
+        for ev in self.session.event_buffer:
+            t = ev.get("type")
+            if t not in self._QA_LOG_TYPES:
+                continue
+            entry = {"seq": ev.get("seq"), "type": t}
+            # Carry type-specific payload fields
+            if t == EventTypes.ROUTE_DECISION:
+                entry["router"] = ev.get("router")
+                entry["decision"] = ev.get("decision")
+                if ev.get("context"):
+                    entry["context"] = ev["context"]
+            elif t == EventTypes.TOOL_CALL:
+                entry["tool"] = ev.get("tool")
+                entry["params"] = ev.get("params")
+                preview = ev.get("result_preview") or ""
+                entry["result_preview"] = preview[:300]
+            elif t in (
+                EventTypes.INVESTIGATION_FINDINGS,
+                EventTypes.CLEANING_RECIPE,
+                EventTypes.PROFILE_SUMMARY,
+                EventTypes.MODEL_METADATA,
+            ):
+                raw = str(ev.get("raw", ""))
+                entry["raw"] = raw[:1500]
+            elif t == EventTypes.LOG:
+                entry["level"] = ev.get("level")
+                entry["node"] = ev.get("node")
+                entry["message"] = ev.get("message")
+                if ev.get("context"):
+                    entry["context"] = ev["context"]
+            elif t in (EventTypes.NODE_STARTED, EventTypes.NODE_COMPLETED):
+                entry["node"] = ev.get("node")
+                if ev.get("duration_ms") is not None:
+                    entry["duration_ms"] = ev["duration_ms"]
+            elif t == EventTypes.TARGET_SELECTION_RESOLVED:
+                entry["target_column"] = ev.get("target_column")
+            out.append(entry)
+        return out
