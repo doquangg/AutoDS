@@ -5,23 +5,27 @@ export default {
   theme: {
     extend: {
       colors: {
-        canvas: "#f7f7f5",
+        canvas: "#faf7f0",
+        canvasDeep: "#f4efe2",
         surface: "#ffffff",
-        ink: "#18181b",
-        muted: "#71717a",
-        subtle: "#a1a1aa",
-        border: "#e4e4e7",
-        borderStrong: "#d4d4d8",
-        accent: "#2563eb",
-        accentHover: "#1d4ed8",
-        success: "#16a34a",
-        danger: "#dc2626",
-        running: "#f59e0b",
-        userBubble: "#2563eb",
+        sidebar: "#f3edde",
+        ink: "#2a2622",
+        inkSoft: "#413b35",
+        muted: "#7a736a",
+        subtle: "#a8a097",
+        border: "#eae3d2",
+        borderStrong: "#d6ccb4",
+        accent: "#c96442",
+        accentHover: "#b05537",
+        accentSoft: "#f3e3d6",
+        success: "#3f8a4d",
+        danger: "#c0392b",
+        running: "#c7894a",
+        userBubble: "#efe7d2",
       },
       fontFamily: {
         sans: [
-          "Inter",
+          "Geist",
           "ui-sans-serif",
           "system-ui",
           "-apple-system",
@@ -29,8 +33,14 @@ export default {
           "Roboto",
           "sans-serif",
         ],
+        display: [
+          "Instrument Serif",
+          "ui-serif",
+          "Georgia",
+          "serif",
+        ],
         mono: [
-          "JetBrains Mono",
+          "Geist Mono",
           "ui-monospace",
           "SFMono-Regular",
           "Menlo",
@@ -38,15 +48,23 @@ export default {
         ],
       },
       boxShadow: {
-        card: "0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 3px 0 rgb(0 0 0 / 0.05)",
-        cardHover: "0 4px 10px -2px rgb(0 0 0 / 0.08)",
-        composer: "0 -2px 20px -8px rgb(0 0 0 / 0.08)",
+        card: "0 1px 2px 0 rgb(42 38 34 / 0.04)",
+        cardHover: "0 6px 20px -8px rgb(42 38 34 / 0.14)",
+        composer:
+          "0 2px 6px -2px rgb(42 38 34 / 0.06), 0 18px 44px -16px rgb(42 38 34 / 0.14)",
+        pill: "0 1px 3px 0 rgb(42 38 34 / 0.06), 0 1px 2px -1px rgb(42 38 34 / 0.06)",
+        soft: "0 1px 2px 0 rgb(42 38 34 / 0.03), 0 1px 3px 0 rgb(42 38 34 / 0.04)",
+      },
+      borderRadius: {
+        "4xl": "2rem",
       },
       animation: {
         "spin-slow": "spin-slow 1.4s linear infinite",
         "pulse-dot": "pulse-dot 1.5s ease-in-out infinite",
-        "fade-in": "fade-in 240ms ease-out",
-        "slide-up": "slide-up 280ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "fade-in": "fade-in 260ms ease-out",
+        "slide-up": "slide-up 320ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "slide-up-lg": "slide-up-lg 520ms cubic-bezier(0.16, 1, 0.3, 1)",
+        shimmer: "shimmer 2.4s ease-in-out infinite",
       },
       keyframes: {
         "spin-slow": {
@@ -64,6 +82,14 @@ export default {
         "slide-up": {
           from: { opacity: "0", transform: "translateY(8px)" },
           to: { opacity: "1", transform: "translateY(0)" },
+        },
+        "slide-up-lg": {
+          from: { opacity: "0", transform: "translateY(16px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+        shimmer: {
+          "0%": { backgroundPosition: "-200% 0" },
+          "100%": { backgroundPosition: "200% 0" },
         },
       },
     },
