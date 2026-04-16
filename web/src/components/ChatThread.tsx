@@ -146,6 +146,22 @@ export function ChatThread() {
       {qaMessages.map((m, i) =>
         m.role === "user" ? (
           <UserMessage key={i} text={m.text} />
+        ) : m.error ? (
+          <div key={i} className="flex items-start gap-3.5 animate-slide-up">
+            <AssistantMark />
+            <div className="flex-1 min-w-0 pt-0.5">
+              <div className="border border-danger/25 bg-danger/5 rounded-xl
+                px-4 py-3 text-[13.5px] text-danger leading-relaxed">
+                <div className="font-semibold mb-0.5">
+                  Couldn't answer that
+                </div>
+                <div className="font-mono text-[12.5px] text-danger/90
+                  whitespace-pre-wrap break-words">
+                  {m.text}
+                </div>
+              </div>
+            </div>
+          </div>
         ) : (
           <div key={i} className="flex items-start gap-3.5 animate-slide-up">
             <AssistantMark />

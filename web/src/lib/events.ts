@@ -17,6 +17,7 @@ export const EventTypes = {
   PIPELINE_FAILED: "pipeline_failed",
   QA_TOKEN: "qa_token",
   QA_COMPLETE: "qa_complete",
+  QA_ERROR: "qa_error",
   HEARTBEAT: "heartbeat",
   REPLAY_TRUNCATED: "replay_truncated",
   LOG: "log",

@@ -270,6 +270,14 @@ class PipelineRunner:
         EventTypes.TARGET_SELECTION_RESOLVED,
     })
 
+    # Cap on how many activity-log entries we send to the Q&A agent.
+    # A 5-pass run with a full investigator tool loop can produce ~500
+    # interesting events; context-window budget says roughly 300 is a
+    # safe upper bound once every entry is trimmed. If we exceed this we
+    # keep the most recent ones — the agent can always scroll the UI for
+    # the full stream.
+    _QA_LOG_MAX_ENTRIES = 300
+
     def _build_activity_log(self) -> list[dict]:
         """
         Compact, serializable projection of the session's event stream for
@@ -314,4 +322,8 @@ class PipelineRunner:
             elif t == EventTypes.TARGET_SELECTION_RESOLVED:
                 entry["target_column"] = ev.get("target_column")
             out.append(entry)
+        # Keep only the most recent N entries; earlier detail is
+        # represented structurally in applied_steps / findings / recipe.
+        if len(out) > self._QA_LOG_MAX_ENTRIES:
+            out = out[-self._QA_LOG_MAX_ENTRIES:]
         return out

@@ -24,6 +24,7 @@ export interface QAMessage {
   role: "user" | "assistant";
   text: string;
   streaming?: boolean;
+  error?: boolean;
 }
 
 interface State {
@@ -53,6 +54,7 @@ interface State {
   appendQAUser(text: string): void;
   appendQAToken(text: string): void;
   finishQA(): void;
+  failQA(message: string): void;
   reset(): void;
 }
 
@@ -63,6 +65,7 @@ const initial: Omit<
   | "appendQAUser"
   | "appendQAToken"
   | "finishQA"
+  | "failQA"
   | "reset"
 > = {
   sessionId: null,
@@ -218,6 +221,29 @@ export const useStore = create<State>((set, get) => ({
           : m,
       ),
     }));
+  },
+
+  failQA(message) {
+    set((s) => {
+      const last = s.qaMessages[s.qaMessages.length - 1];
+      // If we're currently streaming an assistant message, replace it
+      // in-place with the error so the user sees what went wrong instead
+      // of a blinking cursor with no content.
+      if (last && last.role === "assistant" && last.streaming) {
+        return {
+          qaMessages: [
+            ...s.qaMessages.slice(0, -1),
+            { role: "assistant", text: message, error: true },
+          ],
+        };
+      }
+      return {
+        qaMessages: [
+          ...s.qaMessages,
+          { role: "assistant", text: message, error: true },
+        ],
+      };
+    });
   },
 
   reset() {
