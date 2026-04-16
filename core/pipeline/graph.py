@@ -68,6 +68,7 @@ from pathlib import Path
 
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage
 
 # Local Imports
@@ -501,4 +502,7 @@ workflow.add_edge("autogluon", "answer_agent")
 workflow.add_edge("answer_agent", END)
 
 # --- Compile ---
-app = workflow.compile()
+# MemorySaver is required for the web demo's LangGraph interrupts (see
+# core/web/runner.py). It has no semantic effect on CLI runs since the CLI
+# path does not call interrupt().
+app = workflow.compile(checkpointer=MemorySaver())
