@@ -1,29 +1,29 @@
 """
-Adapter from the QA agent (yields strings) to web events
-(QA_TOKEN per chunk, QA_COMPLETE at end, QA_ERROR on failure). Also
-updates the session's qa_messages history.
+Q&A runner: executes the QA agent and pushes its output onto the session's
+shared event stream (queue + ring buffer) using the session's seq counter.
+
+Running the QA agent this way — rather than streaming the response
+directly from the POST /ask handler — means all client-visible events for
+a session flow through a single SSE connection (the GET /events stream),
+which is more reliable than trying to stream a POST response and also
+means QA events replay on SSE reconnect just like pipeline events do.
 """
 from __future__ import annotations
 
 import sys
 import traceback
-from typing import AsyncIterator
 
 from core.agents.qa_agent import run_qa_agent
-from core.web.events import EventTypes, SeqCounter, build_event
+from core.web.events import EventTypes
 from core.web.session import Session
 
 
-async def stream_qa_answer(
-    session: Session, question: str
-) -> AsyncIterator[dict]:
+async def run_qa_task(session: Session, question: str) -> None:
     """
-    Yield event dicts (QA_TOKEN stream, QA_COMPLETE on success, or
-    QA_ERROR on any failure). This function never raises — failures are
-    surfaced to the client as an event and logged to stderr so the
-    problem is visible in both places.
+    Drive the QA agent. Emits QA_TOKEN per chunk, QA_COMPLETE on success,
+    or QA_ERROR on any failure. Never raises — errors are both logged to
+    stderr and surfaced to the UI as events.
     """
-    seq = SeqCounter()
     history = (
         [(m["role"], m["content"]) for m in session.qa_messages]
         if session.qa_messages
@@ -40,17 +40,14 @@ async def stream_qa_answer(
     try:
         async for token in run_qa_agent(session.artifacts, history, question):
             full_answer.append(token)
-            yield build_event(EventTypes.QA_TOKEN, seq, text=token)
-    except Exception as e:  # noqa: BLE001 — broad by design; see note above
+            await session.emit(EventTypes.QA_TOKEN, text=token)
+    except Exception as e:  # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
         print(f"[qa] stream failed: {e!r}", flush=True, file=sys.stderr)
-        yield build_event(
+        await session.emit(
             EventTypes.QA_ERROR,
-            seq,
             error=f"{type(e).__name__}: {e}",
         )
-        # Persist the user question + a failure marker so the history
-        # doesn't end up half-written on the next turn.
         session.qa_messages.append({"role": "user", "content": question})
         session.qa_messages.append(
             {
@@ -61,15 +58,15 @@ async def stream_qa_answer(
         return
 
     answer_text = "".join(full_answer)
-    print(f"[qa] done tokens={len(full_answer)} chars={len(answer_text)}",
-          flush=True, file=sys.stderr)
+    print(
+        f"[qa] done tokens={len(full_answer)} chars={len(answer_text)}",
+        flush=True,
+        file=sys.stderr,
+    )
 
     if not answer_text.strip():
-        # LLM returned nothing — treat as an error so the UI can show
-        # something actionable instead of silently hanging.
-        yield build_event(
+        await session.emit(
             EventTypes.QA_ERROR,
-            seq,
             error=(
                 "The Q&A agent returned an empty response. This usually "
                 "means the model configuration is wrong (check QA_MODEL / "
@@ -80,4 +77,4 @@ async def stream_qa_answer(
 
     session.qa_messages.append({"role": "user", "content": question})
     session.qa_messages.append({"role": "assistant", "content": answer_text})
-    yield build_event(EventTypes.QA_COMPLETE, seq, text=answer_text)
+    await session.emit(EventTypes.QA_COMPLETE, text=answer_text)

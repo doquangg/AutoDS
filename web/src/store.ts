@@ -172,6 +172,19 @@ export const useStore = create<State>((set, get) => ({
       case EventTypes.SESSION_STARTED:
         // already handled by startSession
         return;
+      case EventTypes.QA_TOKEN:
+        // Appended through the same helper so the streaming bubble
+        // accumulates naturally.
+        get().appendQAToken((ev.text as string) ?? "");
+        return;
+      case EventTypes.QA_COMPLETE:
+        get().finishQA();
+        return;
+      case EventTypes.QA_ERROR:
+        get().failQA(
+          (ev.error as string) ?? "The Q&A agent reported an error",
+        );
+        return;
       default: {
         // Bind detail events to the current (last running) step
         const last = [...s.steps].reverse().find((x) => x.status === "running");

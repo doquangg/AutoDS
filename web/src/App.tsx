@@ -12,8 +12,6 @@ export default function App() {
   const startSession = useStore((s) => s.startSession);
   const applyEvent = useStore((s) => s.applyEvent);
   const appendQAUser = useStore((s) => s.appendQAUser);
-  const appendQAToken = useStore((s) => s.appendQAToken);
-  const finishQA = useStore((s) => s.finishQA);
   const failQA = useStore((s) => s.failQA);
   const reset = useStore((s) => s.reset);
 
@@ -53,6 +51,10 @@ export default function App() {
     if (!sessionId) return;
     appendQAUser(q);
 
+    // POST /ask is now fire-and-forget. The server spawns a Q&A task that
+    // pushes QA_TOKEN / QA_COMPLETE / QA_ERROR events onto the shared
+    // session stream, where the existing EventSource subscription picks
+    // them up and applyEvent dispatches through the store.
     let resp: Response;
     try {
       resp = await askQuestion(sessionId, q);
@@ -64,63 +66,6 @@ export default function App() {
       const body = await resp.text().catch(() => "");
       failQA(
         `Server returned ${resp.status}${body ? `: ${body.slice(0, 240)}` : ""}`,
-      );
-      return;
-    }
-    if (!resp.body) {
-      failQA("Server returned no response body");
-      return;
-    }
-
-    const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    let sawAnything = false;
-    let sawComplete = false;
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) {
-          const m = /^data: (.+)$/m.exec(line);
-          if (!m) continue;
-          try {
-            const ev = JSON.parse(m[1]);
-            sawAnything = true;
-            if (ev.type === "qa_token") appendQAToken(ev.text);
-            else if (ev.type === "qa_complete") {
-              finishQA();
-              sawComplete = true;
-            } else if (ev.type === "qa_error") {
-              failQA(
-                typeof ev.error === "string"
-                  ? ev.error
-                  : "The Q&A agent reported an error",
-              );
-              sawComplete = true;
-            }
-          } catch {
-            // skip malformed
-          }
-        }
-      }
-    } catch (e) {
-      failQA(
-        `Stream failed: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      return;
-    }
-
-    // Stream ended without any qa_complete/qa_error — surface something
-    // instead of leaving a blinking cursor with no content.
-    if (!sawComplete) {
-      failQA(
-        sawAnything
-          ? "The response ended unexpectedly before completing."
-          : "The server closed the connection without sending any response. Check the backend logs for Q&A errors.",
       );
     }
   }

@@ -185,8 +185,16 @@ def create_app(graph_app: Optional[Any] = None) -> FastAPI:
         return EventSourceResponse(event_generator(), ping=15)
 
     @app.post("/sessions/{sid}/ask")
-    async def ask_followup(sid: str, body: dict, request: Request):
-        from core.web.qa import stream_qa_answer  # lazy import
+    async def ask_followup(sid: str, body: dict):
+        """
+        Fire-and-forget: spawn the Q&A agent as a background task and
+        return immediately. All output (QA_TOKEN / QA_COMPLETE / QA_ERROR)
+        flows through the session's existing /events SSE stream, alongside
+        pipeline events. This avoids the well-known flakiness of streaming
+        a POST response body to the browser and keeps the frontend's event
+        handling uniform.
+        """
+        from core.web.qa import run_qa_task  # lazy import
         try:
             s = sessions.get(sid)
         except KeyError:
@@ -199,15 +207,15 @@ def create_app(graph_app: Optional[Any] = None) -> FastAPI:
         if not question:
             raise HTTPException(status_code=400, detail="question required")
 
-        async def event_generator():
-            async for chunk in stream_qa_answer(s, question):
-                if await request.is_disconnected():
-                    return
-                yield {
-                    "event": "message",
-                    "data": json.dumps(chunk, default=str),
-                }
+        # Don't start a second QA run while one is already in flight for
+        # this session — emitted events would interleave.
+        if s.qa_task is not None and not s.qa_task.done():
+            raise HTTPException(
+                status_code=409,
+                detail="A Q&A request is already in progress for this session",
+            )
 
-        return EventSourceResponse(event_generator())
+        s.qa_task = asyncio.create_task(run_qa_task(s, question))
+        return {"ok": True}
 
     return app

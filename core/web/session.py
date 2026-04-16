@@ -19,6 +19,8 @@ from typing import Any, Literal, Optional
 
 from langchain_core.messages import BaseMessage
 
+from core.web.events import SeqCounter, build_event
+
 
 SessionStatus = Literal[
     "pending", "running", "paused", "complete", "failed", "cancelled"
@@ -34,11 +36,17 @@ class Session:
     csv_bytes: bytes
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     event_buffer: deque = field(default_factory=lambda: deque(maxlen=1000))
+    # Shared monotonic seq across everything the session emits — pipeline
+    # runner, logger sink, and post-run Q&A all draw from this. Keeping a
+    # single counter means QA events strictly follow pipeline events in
+    # the stream, so the SSE reconnect dedup (`seq <= last_yielded`) works.
+    seq_counter: SeqCounter = field(default_factory=SeqCounter)
     status: SessionStatus = "pending"
     paused_for: Optional[PauseReason] = None
     pause_payload: Optional[dict] = None
     resume_future: Optional[asyncio.Future] = None
     task: Optional[asyncio.Task] = None
+    qa_task: Optional[asyncio.Task] = None
     artifacts: Optional[dict] = None
     qa_messages: list[BaseMessage] = field(default_factory=list)
     error: Optional[str] = None
@@ -46,6 +54,18 @@ class Session:
     def record_event(self, event: dict) -> None:
         """Append to the ring buffer (used for SSE reconnect replay)."""
         self.event_buffer.append(event)
+
+    async def emit(self, event_type: str, **fields: Any) -> dict:
+        """
+        Build an event with the session's shared seq counter, record it to
+        the replay buffer, and publish it on the live queue. The single
+        entry point used by the runner, the log sink, and the Q&A task so
+        seq numbers stay monotonic and every event is replayable.
+        """
+        ev = build_event(event_type, self.seq_counter, **fields)
+        self.record_event(ev)
+        await self.queue.put(ev)
+        return ev
 
     def replay_since(self, last_seq: int):
         """

@@ -19,7 +19,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from core.web.events import EventTypes, SeqCounter, build_event
+from core.web.events import EventTypes
 from core.web.log_sink import QueueLogHandler
 from core.web.session import Session
 
@@ -33,7 +33,6 @@ class PipelineRunner:
     def __init__(self, session: Session, graph_app: Any):
         self.session = session
         self.graph_app = graph_app
-        self.seq = SeqCounter()
         self._loop = asyncio.get_event_loop()
         self._node_started_at: dict[str, float] = {}
 
@@ -43,7 +42,7 @@ class PipelineRunner:
         prior_mode = os.environ.get("AUTODS_INTERACTIVE_MODE")
         os.environ["AUTODS_INTERACTIVE_MODE"] = "web"
         sink = QueueLogHandler(
-            self.session.queue, self.seq, self._loop,
+            self.session.queue, self.session.seq_counter, self._loop,
             record_to=self.session.record_event,
         )
         prior_level = _AUTODS_LOG.level
@@ -203,11 +202,9 @@ class PipelineRunner:
     # Helpers
     # ------------------------------------------------------------------
     async def _emit(self, fields: dict) -> None:
-        """Build, buffer, and enqueue an event."""
+        """Build, buffer, and enqueue an event through the shared session."""
         ev_type = fields.pop("type")
-        ev = build_event(ev_type, self.seq, **fields)
-        self.session.record_event(ev)
-        await self.session.queue.put(ev)
+        ev = await self.session.emit(ev_type, **fields)
         # Mirror to stderr so server logs show the event stream — invaluable
         # when something hangs mid-run.
         summary = {k: v for k, v in ev.items() if k not in {"ts", "seq"}}

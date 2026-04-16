@@ -61,6 +61,15 @@ export function PaperclipIcon({ size, ...rest }: IconProps) {
   );
 }
 
+export function ArrowUpIcon({ size, ...rest }: IconProps) {
+  return (
+    <svg {...base(size)} {...rest}>
+      <path d="M12 19V5" />
+      <path d="M5 12l7-7 7 7" />
+    </svg>
+  );
+}
+
 export function SendIcon({ size, ...rest }: IconProps) {
   return (
     <svg {...base(size)} {...rest}>
@@ -103,6 +112,41 @@ export function TargetIcon({ size, ...rest }: IconProps) {
       <circle cx="12" cy="12" r="10" />
       <circle cx="12" cy="12" r="6" />
       <circle cx="12" cy="12" r="2" />
+    </svg>
+  );
+}
+
+export function PlusIcon({ size, ...rest }: IconProps) {
+  return (
+    <svg {...base(size)} {...rest}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+export function LogoMark({ size = 28, ...rest }: IconProps) {
+  const s = size;
+  return (
+    <svg
+      width={s}
+      height={s}
+      viewBox="0 0 32 32"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      {...rest}
+    >
+      <circle cx="16" cy="16" r="15" stroke="#c96442" strokeWidth="1.25" />
+      <circle cx="16" cy="16" r="10.5" fill="#c96442" />
+      <path
+        d="M10.5 19.5 L13.5 14 L16.2 17 L19 11 L21.5 19.5"
+        stroke="#faf7f0"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <circle cx="13.5" cy="14" r="0.9" fill="#faf7f0" />
+      <circle cx="19" cy="11" r="0.9" fill="#faf7f0" />
     </svg>
   );
 }

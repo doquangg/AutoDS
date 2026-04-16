@@ -13,20 +13,24 @@ export function FileChip({
 }: {
   name: string;
   size?: number;
-  variant?: "light" | "dark";
+  variant?: "light" | "dark" | "subtle";
 }) {
-  const styles =
-    variant === "dark"
-      ? "bg-white/20 text-white"
-      : "bg-canvas text-ink border border-border";
+  const styles: Record<string, string> = {
+    light: "bg-canvasDeep text-ink border border-border",
+    dark: "bg-ink/85 text-canvas border border-ink",
+    subtle: "bg-surface/80 text-inkSoft border border-border/80",
+  };
   return (
     <span
-      className={`inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded-md ${styles}`}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-[11.5px]
+        font-medium rounded-full ${styles[variant]}`}
     >
-      <FileIcon size={12} className="shrink-0 opacity-80" />
-      <span className="truncate max-w-[240px]">{name}</span>
+      <FileIcon size={11} className="shrink-0 opacity-70" />
+      <span className="truncate max-w-[260px]">{name}</span>
       {size !== undefined && (
-        <span className="opacity-70 tabular-nums">{fmtSize(size)}</span>
+        <span className="opacity-60 tabular-nums font-mono text-[10.5px]">
+          {fmtSize(size)}
+        </span>
       )}
     </span>
   );
