@@ -68,6 +68,8 @@ from pathlib import Path
 
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langchain_core.messages import AIMessage
 
 # Local Imports
@@ -501,4 +503,15 @@ workflow.add_edge("autogluon", "answer_agent")
 workflow.add_edge("answer_agent", END)
 
 # --- Compile ---
-app = workflow.compile()
+# MemorySaver is required for the web demo's LangGraph interrupts (see
+# core/web/runner.py). It has no semantic effect on CLI runs since the CLI
+# path does not call interrupt().
+#
+# pickle_fallback=True allows the checkpointer to serialize values that
+# msgpack can't handle natively — in our case, pandas DataFrames live in
+# AgentState.working_df. Without this, interrupts fail with
+# "Type is not msgpack serializable: DataFrame" the first time a checkpoint
+# is written (which happens just before the target_selector interrupt).
+app = workflow.compile(
+    checkpointer=MemorySaver(serde=JsonPlusSerializer(pickle_fallback=True))
+)

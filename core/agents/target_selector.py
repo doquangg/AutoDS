@@ -19,6 +19,7 @@ import os
 from typing import Any, Dict, List
 
 from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
 from core.pipeline.state import AgentState
@@ -202,9 +203,26 @@ def select_target_column(state: AgentState) -> Dict[str, Any]:
             for name in sorted(all_column_names)[:5]
         ]
 
-    # Prompt user
-    selected = prompt_user_selection(candidates, all_column_names)
-    log_node("target_selector", "user selected target column",
-             target_column=selected)
+    # Branch on interactive mode
+    mode = os.environ.get("AUTODS_INTERACTIVE_MODE", "cli").strip().lower()
+    if mode == "web":
+        # Raise a LangGraph interrupt; the web runner catches it and surfaces
+        # it to the UI. The returned value is the user's selection.
+        selected = interrupt({
+            "candidates": [c.model_dump() for c in candidates],
+            "all_columns": all_column_names,
+            "user_query": state["user_query"],
+        })
+        if selected not in all_column_names:
+            raise ValueError(
+                f"Target selection '{selected}' not found in dataset columns"
+            )
+        log_node("target_selector", "user selected target column (web)",
+                 target_column=selected)
+        return {"target_column": selected}
 
+    # CLI mode (default): unchanged
+    selected = prompt_user_selection(candidates, all_column_names)
+    log_node("target_selector", "user selected target column (cli)",
+             target_column=selected)
     return {"target_column": selected}
