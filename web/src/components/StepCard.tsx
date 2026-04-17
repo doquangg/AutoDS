@@ -108,16 +108,6 @@ export function StepCard({ steps }: { steps: StepCardData[] }) {
   const isMulti = steps.length > 1;
   const hasExpandable = totalDetails > 0 || isMulti;
 
-  // Pass range summary: "pass 1" for one, "passes 1–3" for a range.
-  const minPass = Math.min(...steps.map((s) => s.pass));
-  const maxPass = Math.max(...steps.map((s) => s.pass));
-  const passLabel =
-    maxPass === 0
-      ? null
-      : minPass === maxPass
-        ? `pass ${minPass + 1}`
-        : `passes ${minPass + 1}–${maxPass + 1}`;
-
   return (
     <div className="group animate-fade-in">
       <button
@@ -140,12 +130,6 @@ export function StepCard({ steps }: { steps: StepCardData[] }) {
             bg-accent/10 ring-1 ring-accent/15 px-1.5 py-0.5 rounded-full
             tracking-wide font-mono tabular-nums">
             {steps.length}×
-          </span>
-        )}
-        {passLabel && (
-          <span className="text-[10.5px] font-medium text-muted bg-canvasDeep
-            px-1.5 py-0.5 rounded tracking-wide font-mono">
-            {passLabel}
           </span>
         )}
         {totalDuration != null && (

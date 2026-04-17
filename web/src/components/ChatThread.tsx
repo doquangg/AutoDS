@@ -1,27 +1,42 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { useStore } from "../store";
 import type { StepCard as StepCardData } from "../store";
 import { UserMessage } from "./UserMessage";
 import { StepCard } from "./StepCard";
 import { TargetSelectionPrompt } from "./TargetSelectionPrompt";
-import { LogoMark } from "./Icons";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  LogoMark,
+  SpinnerIcon,
+  XIcon,
+} from "./Icons";
+
+// `tools` is the executor for whatever the investigator just requested,
+// so the user perceives investigator+tools as a single "investigation"
+// phase. Mapping both nodes to one group key collapses the alternating
+// investigator → tools → investigator loop into one card.
+function groupKeyOf(node: string): string {
+  if (node === "investigator" || node === "tools") return "investigation";
+  return node;
+}
 
 /**
- * Group consecutive runs of the same graph node into a single card.
- * The investigator ⟲ tools loop and multi-pass cleaning produce a lot of
- * same-node repetition; grouping them keeps the pipeline view scannable
+ * Group consecutive runs that share a group key into a single card.
+ * Multi-pass cleaning and the investigator loop produce a lot of
+ * same-phase repetition; grouping them keeps the pipeline view scannable
  * while still letting the user drill in per-run.
  *
- * We only collapse *adjacent* same-node steps so ordering is preserved
- * (e.g. profiler-pass-0 and profiler-pass-1 remain separate when
- * target_selector or other work sits between them).
+ * We only collapse *adjacent* steps so ordering is preserved (e.g.
+ * profiler-pass-0 and profiler-pass-1 remain separate when other work
+ * sits between them).
  */
 function groupConsecutive(steps: StepCardData[]): StepCardData[][] {
   const groups: StepCardData[][] = [];
   for (const s of steps) {
     const tail = groups[groups.length - 1];
-    if (tail && tail[0].node === s.node) {
+    if (tail && groupKeyOf(tail[0].node) === groupKeyOf(s.node)) {
       tail.push(s);
     } else {
       groups.push([s]);
@@ -178,13 +193,171 @@ export function ChatThread() {
   );
 }
 
-function StepGroups({ steps }: { steps: StepCardData[] }) {
-  const groups = useMemo(() => groupConsecutive(steps), [steps]);
+const NODE_LABEL: Record<string, string> = {
+  profiler: "Profiling data",
+  target_selector: "Selecting target column",
+  investigator: "Investigating data",
+  tools: "Running investigation tools",
+  code_generator: "Generating cleaning code",
+  sandbox: "Executing code",
+  re_profile: "Re-profiling",
+  pass_reset: "Starting next pass",
+  feature_engineering: "Feature engineering",
+  autogluon: "Training model",
+  answer_agent: "Generating answer",
+};
+
+function groupByPass(
+  steps: StepCardData[],
+): { pass: number; steps: StepCardData[] }[] {
+  const groups: { pass: number; steps: StepCardData[] }[] = [];
+  for (const s of steps) {
+    const tail = groups[groups.length - 1];
+    if (tail && tail.pass === s.pass) {
+      tail.steps.push(s);
+    } else {
+      groups.push({ pass: s.pass, steps: [s] });
+    }
+  }
+  return groups;
+}
+
+function aggregatePassStatus(
+  steps: StepCardData[],
+): "running" | "done" | "failed" {
+  if (steps.some((s) => s.status === "failed")) return "failed";
+  if (steps.some((s) => s.status === "running")) return "running";
+  return "done";
+}
+
+function PassStatusIcon({
+  status,
+}: {
+  status: "running" | "done" | "failed";
+}) {
+  if (status === "done") {
+    return (
+      <span className="inline-flex items-center justify-center w-[20px] h-[20px]
+        rounded-full bg-success/12 text-success ring-1 ring-success/20">
+        <CheckIcon size={12} strokeWidth={3} />
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="inline-flex items-center justify-center w-[20px] h-[20px]
+        rounded-full bg-danger/12 text-danger ring-1 ring-danger/20">
+        <XIcon size={12} strokeWidth={3} />
+      </span>
+    );
+  }
   return (
-    <div className="mt-3 space-y-0.5">
-      {groups.map((g) => (
-        <StepCard key={g[0].key} steps={g} />
+    <span className="inline-flex items-center justify-center w-[20px] h-[20px]
+      rounded-full bg-running/12 text-running ring-1 ring-running/25">
+      <SpinnerIcon size={12} strokeWidth={2.6} />
+    </span>
+  );
+}
+
+function StepGroups({ steps }: { steps: StepCardData[] }) {
+  const passGroups = useMemo(() => groupByPass(steps), [steps]);
+  const latestPass = passGroups[passGroups.length - 1]?.pass ?? null;
+  return (
+    <div className="mt-3 space-y-1.5">
+      {passGroups.map((pg) => (
+        <PassDisclosure
+          key={pg.pass}
+          pass={pg.pass}
+          passSteps={pg.steps}
+          isLatest={pg.pass === latestPass}
+        />
       ))}
+    </div>
+  );
+}
+
+function PassDisclosure({
+  pass,
+  passSteps,
+  isLatest,
+}: {
+  pass: number;
+  passSteps: StepCardData[];
+  isLatest: boolean;
+}) {
+  // Latest pass opens automatically; when a new pass starts, the old one
+  // auto-collapses. Users can still toggle mid-pass — we reset the override
+  // whenever latest-ness changes so predictable accordion behavior wins.
+  const [override, setOverride] = useState<boolean | null>(null);
+  useEffect(() => {
+    setOverride(null);
+  }, [isLatest]);
+  const open = override ?? isLatest;
+
+  const status = aggregatePassStatus(passSteps);
+  const nodeGroups = useMemo(() => groupConsecutive(passSteps), [passSteps]);
+
+  const totalDuration = passSteps.every((s) => s.durationMs != null)
+    ? passSteps.reduce((t, s) => t + (s.durationMs ?? 0), 0)
+    : undefined;
+
+  const runningStep = passSteps.find((s) => s.status === "running");
+  const runningLabel = runningStep
+    ? (NODE_LABEL[runningStep.node] ?? runningStep.node)
+    : null;
+
+  const stepCount = passSteps.length;
+  const stepCountLabel = `${stepCount} ${stepCount === 1 ? "step" : "steps"}`;
+
+  return (
+    <div
+      className={`rounded-xl border transition-colors
+        ${status === "running"
+          ? "border-running/30 bg-running/[0.03]"
+          : status === "failed"
+            ? "border-danger/25 bg-danger/[0.03]"
+            : "border-border/60 bg-surface/40"}
+        ${open ? "shadow-soft" : ""}`}
+    >
+      <button
+        onClick={() => setOverride(!open)}
+        className="flex items-center gap-3 w-full text-left px-3 py-2
+          rounded-xl hover:bg-canvasDeep/40 transition"
+      >
+        <PassStatusIcon status={status} />
+        <span className="font-display text-[14.5px] tracking-tight text-ink">
+          Pass <span className="tabular-nums">{pass + 1}</span>
+        </span>
+        <span className="text-[11px] text-subtle tabular-nums">
+          {stepCountLabel}
+        </span>
+        {!open && runningLabel && (
+          <span className="min-w-0 truncate text-[11.5px] text-muted italic">
+            · {runningLabel}…
+          </span>
+        )}
+        {totalDuration != null && (
+          <span className="ml-auto text-[11.5px] text-subtle tabular-nums
+            font-mono">
+            {(totalDuration / 1000).toFixed(1)}s
+          </span>
+        )}
+        <span
+          className={`${totalDuration != null ? "" : "ml-auto"} text-subtle
+            transition-transform duration-200
+            ${open ? "rotate-0" : "-rotate-90"}`}
+        >
+          <ChevronDownIcon size={14} />
+        </span>
+      </button>
+
+      {open && (
+        <div className="px-2 pb-1.5 pt-0.5 space-y-0.5 animate-fade-in">
+          {nodeGroups.map((g) => (
+            <StepCard key={g[0].key} steps={g} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
