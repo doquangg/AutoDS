@@ -65,6 +65,8 @@ re_profile                              │
 5. **Feature engineering**: Runs once after cleaning completes. Internally loops through up to 3 rounds of planner → codegen → sandbox → re-profile, with a defensive target-leakage lint.
 6. **Subprocess sandbox**: LLM-generated code executes in an isolated subprocess with a 120-second timeout, so crashes don't take down the main process.
 7. **Human-in-the-loop target selection**: After profiling, an LLM ranks candidate target columns and the user confirms via CLI prompt (or `AUTO_TARGET_COLUMN` env var for non-interactive mode).
+8. **Checkpointed graph**: The graph is compiled with a `MemorySaver` checkpointer (`pickle_fallback=True` so DataFrames serialize) and run with `recursion_limit=500`. This lets the web app interrupt at the target-selection node, persist state, and resume on user input.
+9. **Grounded Q&A agent**: After a run completes, a separate streaming Q&A agent answers follow-up questions using only the saved run artifacts (profile, investigation findings, cleaning recipe, FE recipe, model metadata, final answer, activity log).
 
 ## Project Structure
 
@@ -72,15 +74,23 @@ re_profile                              │
 AutoDS/
 ├── core/
 │   ├── agents/
-│   │   ├── agents.py               # Investigator, Code Generator, and Answer agents
+│   │   ├── agents.py                # Investigator, Code Generator, and Answer agents
 │   │   ├── feature_engineering.py   # FE planner + codegen agents and the FE graph node
+│   │   ├── qa_agent.py              # Streaming Q&A agent for post-run follow-ups
 │   │   └── target_selector.py       # Human-in-the-loop target column selection
 │   ├── pipeline/
-│   │   ├── graph.py                 # LangGraph state machine assembly
+│   │   ├── graph.py                 # LangGraph state machine assembly (with MemorySaver)
 │   │   └── state.py                 # AgentState TypedDict (shared state schema)
 │   ├── runtime/
 │   │   ├── sandbox.py               # Subprocess-based sandbox for LLM-generated code
 │   │   └── tools.py                 # Read-only investigation tools for the investigator
+│   ├── web/
+│   │   ├── app.py                   # FastAPI app: session, SSE, upload, resume, Q&A
+│   │   ├── runner.py                # Pipeline runner with interrupt-resume + event streaming
+│   │   ├── session.py               # In-memory session manager with ring-buffer SSE replay
+│   │   ├── qa.py                    # Q&A SSE adapter routed through the session stream
+│   │   ├── events.py                # Event schema and type constants
+│   │   └── log_sink.py              # Translates autods log records into SSE events
 │   ├── prompts/                     # System prompts for each agent (*.txt files)
 │   ├── schemas.py                   # Pydantic schemas for all data contracts
 │   └── logger.py                    # Centralized verbose logging
@@ -90,10 +100,13 @@ AutoDS/
 ├── scripts/
 │   ├── run_graph.py                 # Main entry point — run the full pipeline
 │   ├── run_graph_orcheval.py        # Run with OrchEval tracing and reporting
+│   ├── run_web.py                   # Launch the web demo (FastAPI + built UI)
 │   ├── download_benchmarks.py       # Download UCI benchmark datasets
 │   └── evaluate_benchmarks.py       # End-to-end benchmark evaluation harness
+├── web/                             # React + Vite + TS + Tailwind frontend (chat UI)
 ├── data/
 │   ├── sample_data/healthcare/      # Sample dirty healthcare dataset
+│   ├── benchmark_data/              # Downloaded UCI benchmark datasets
 │   └── benchmark_metadata.yaml      # UCI benchmark dataset configurations
 ├── env.yml                          # Conda environment specification
 └── output/                          # Pipeline outputs (cleaned CSV, model, logs)
