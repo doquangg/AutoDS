@@ -79,7 +79,10 @@ def main() -> None:
     print("=" * 70)
     print("RUNNING LANGGRAPH PIPELINE")
     print("=" * 70)
-    result = app.invoke(initial_state)
+    result = app.invoke(
+        initial_state,
+        config={"configurable": {"thread_id": "run-graph-cli"}},
+    )
 
     # ------------------------------------------------------------------
     # 3. Display results

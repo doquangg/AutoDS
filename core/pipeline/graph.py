@@ -504,8 +504,9 @@ workflow.add_edge("answer_agent", END)
 
 # --- Compile ---
 # MemorySaver is required for the web demo's LangGraph interrupts (see
-# core/web/runner.py). It has no semantic effect on CLI runs since the CLI
-# path does not call interrupt().
+# core/web/runner.py). Once a checkpointer is attached, every .invoke() /
+# .stream() call must pass config={"configurable": {"thread_id": ...}},
+# including CLI callers that never trigger interrupt().
 #
 # pickle_fallback=True allows the checkpointer to serialize values that
 # msgpack can't handle natively — in our case, pandas DataFrames live in

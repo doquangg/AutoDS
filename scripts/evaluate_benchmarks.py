@@ -378,7 +378,10 @@ def run_one(ds: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[{name}] Invoking AutoDS graph (throwaway training, "
               f"AUTOGLUON_TIME_LIMIT={GRAPH_THROWAWAY_TIME_LIMIT}s)...")
         try:
-            graph_result = app.invoke(initial_state)
+            graph_result = app.invoke(
+                initial_state,
+                config={"configurable": {"thread_id": f"benchmark-{name}"}},
+            )
         except Exception as e:
             traceback.print_exc()
             result_row["status"] = "graph_failed"
